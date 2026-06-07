@@ -1,5 +1,12 @@
-   [client]
-   toolbarMode = "viewer"
+[client]
+toolbarMode = "viewer"
 
-   [ui]
-   hideTopBar = true
+[ui]
+hideTopBar = true
+
+[theme]
+base = "dark"
+primaryColor = "#2DD4BF"
+backgroundColor = "#0B1014"
+secondaryBackgroundColor = "#0F1A1F"
+textColor = "#D8DEE4"

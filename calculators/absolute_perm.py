@@ -1,5 +1,14 @@
+"""
+Single-phase permeability history matching using Nelder-Mead optimization.
+
+This module solves for the absolute permeability k of a 1D core sample by
+matching the simulated steady-state pressure drop to a target value.
+
+The numerical method is a 20-cell finite-difference scheme with implicit
+(backward Euler) time stepping, solved each step with a sparse linear solver.
+"""
+
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import scipy.optimize
@@ -7,8 +16,23 @@ import scipy.optimize
 
 def match_permeability(L_cm, A_cm2, phi, mu_cP, c_Pa, q_ml_min, P_out_bar,
                        total_time_mins, dt_mins, target_dp_mbar):
+    """
+    Run history matching to find the permeability k (in mD) that produces
+    a steady-state pressure drop matching `target_dp_mbar`.
 
-    # ── Unit Conversions ──────────────────────────────────────────────────────
+    Returns
+    -------
+    optimised_k : float
+        Best-fit permeability in millidarcy.
+    time_plot : list[float]
+        Time samples (minutes), including the t=0 origin.
+    delta_p_plot : list[float]
+        Simulated ΔP at each time sample (mbar), including 0 at t=0.
+    n_iterations : int
+        Number of optimizer iterations consumed.
+    """
+
+    # ── Unit Conversions (input units → SI) ──────────────────────────────────
     L = L_cm / 100.0
     A = A_cm2 / 10000.0
     mu = mu_cP * 1e-3
@@ -64,7 +88,7 @@ def match_permeability(L_cm, A_cm2, phi, mu_cP, c_Pa, q_ml_min, P_out_bar,
             p_inj_results.append(inlet_pressure_mbar)
 
         steady_state_pressure = p_inj_results[-1]
-        steady_state_delta = steady_state_pressure - p_out_mbar  # dynamic back-pressure
+        steady_state_delta = steady_state_pressure - p_out_mbar
         return steady_state_delta
 
     def objective_function(k_array):
@@ -91,7 +115,7 @@ def match_permeability(L_cm, A_cm2, phi, mu_cP, c_Pa, q_ml_min, P_out_bar,
     )
     optimised_k = result.x[0]
 
-    # ── Final Plotting Run ────────────────────────────────────────────────────
+    # ── Final Simulation Run (to collect time-series for plotting) ───────────
     k_m2_final = optimised_k * 9.869233e-16
     T_final = (k_m2_final * A) / (mu * dx)
     T_out_final = (k_m2_final * A) / (mu * (dx / 2.0))
@@ -125,28 +149,9 @@ def match_permeability(L_cm, A_cm2, phi, mu_cP, c_Pa, q_ml_min, P_out_bar,
         current_time_min = (step + 1) * dt_mins
         inlet_pressure_mbar = P_final[0] / 100.0
         time_results.append(current_time_min)
-        delta_p_results.append(inlet_pressure_mbar - p_out_mbar)  # dynamic back-pressure
+        delta_p_results.append(inlet_pressure_mbar - p_out_mbar)
 
     time_plot = [0.0] + list(time_results)
     delta_p_plot = [0.0] + list(delta_p_results)
 
-    # ── Streamlit-Compatible Plot ─────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(time_plot, delta_p_plot,
-            label=f'Optimised (k = {optimised_k:.2f} mD)', color='blue', linewidth=2)
-    ax.axhline(y=target_dp_mbar, color='red', linestyle='--', linewidth=2,
-               label=f'Target ΔP ({target_dp_mbar} mbar)')
-    ax.set_title(
-        f'Differential Pressure Drop Across Core over Time\n'
-        f'(History-Matched Result — k = {optimised_k:.2f} mD)',
-        fontsize=14
-    )
-    ax.set_xlabel('Time [minutes]', fontsize=12)
-    ax.set_ylabel('Differential Pressure (ΔP) [mbar]', fontsize=12)
-    ax.set_xlim(0, total_time_mins)
-    ax.set_ylim(0, max(60, max(delta_p_plot) * 1.1))
-    ax.grid(True, linestyle=':', alpha=0.7)
-    ax.legend(loc='lower right', fontsize=11)
-    fig.tight_layout()
-
-    return optimised_k, fig
+    return optimised_k, time_plot, delta_p_plot, iteration_counter[0]
