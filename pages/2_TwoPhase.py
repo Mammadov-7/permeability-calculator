@@ -48,10 +48,17 @@ html, body, [class*="css"] { font-family: 'Courier New', monospace; }
 .app-title { color: #F0F4F8; font-size: 16px; }
 
 .debug-box {
-    background: #0F1A1F; border-left: 3px solid #2DD4BF;
-    padding: 12px 16px; margin: 0.5rem 0;
-    color: #C9D1D9; font-size: 12px;
+    background: #0F1A1F; border-left: 4px solid #2DD4BF;
+    padding: 24px 28px; margin: 0.6rem 0;
+    color: #C9D1D9 !important;
+    font-size: 22px !important; line-height: 1.9 !important;
 }
+.debug-box * {
+    font-size: 22px !important;
+    line-height: 1.9 !important;
+}
+.debug-box code { color: #2DD4BF !important; }
+.debug-box b    { color: #F0F4F8 !important; }
 .debug-box code { color: #2DD4BF; }
 .warn-box {
     background: #2A1F0F; border-left: 3px solid #FB923C;
@@ -84,12 +91,12 @@ with col_inj:
                 unsafe_allow_html=True)
     injected = phase_picker("inj", default="H2")
 with col_res:
-    st.markdown('<div class="group-label">Resident phase</div>',
+    st.markdown('<div class="group-label">Displaced phase</div>',
                 unsafe_allow_html=True)
-    resident = phase_picker("res", default="Brine (3% NaCl)")
+    displaced = phase_picker("disp", default="Brine (3% NaCl)")
 
 # ── Fluid pair sanity check ─────────────────────────────────────────────────
-if injected["type"] == resident["type"]:
+if injected["type"] == displaced["type"]:
     st.markdown(
         f'<div class="warn-box">⚠ Unusual fluid pair — both phases are '
         f'<b>{injected["type"]}</b>. Typical relative-permeability tests '
@@ -105,9 +112,9 @@ st.markdown(
     f'<b>Injected:</b> {injected["name"]} ({injected["type"]}) — '
     f'ρ = <code>{injected["density_kg_m3"]:.3f} kg/m³</code>, '
     f'μ = <code>{injected["viscosity_cP"]:.4f} cP</code><br>'
-    f'<b>Resident:</b> {resident["name"]} ({resident["type"]}) — '
-    f'ρ = <code>{resident["density_kg_m3"]:.3f} kg/m³</code>, '
-    f'μ = <code>{resident["viscosity_cP"]:.4f} cP</code>'
+    f'<b>Displaced:</b> {displaced["name"]} ({displaced["type"]}) — '
+    f'ρ = <code>{displaced["density_kg_m3"]:.3f} kg/m³</code>, '
+    f'μ = <code>{displaced["viscosity_cP"]:.4f} cP</code>'
     f'</div>',
     unsafe_allow_html=True,
 )
