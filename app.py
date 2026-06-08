@@ -27,6 +27,8 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    [data-testid="stSidebarNav"] {display: none;}
+    [data-testid="stSidebar"]    {display: none;}
     #MainMenu          {visibility: hidden;}
     header             {visibility: hidden;}
     footer             {visibility: hidden;}
