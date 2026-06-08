@@ -1,0 +1,37 @@
+{
+  "Water (fresh)": {
+    "type": "liquid",
+    "density_kg_m3": 997.0,
+    "viscosity_cP": 0.89
+  },
+  "Brine (3% NaCl)": {
+    "type": "liquid",
+    "density_kg_m3": 1020.0,
+    "viscosity_cP": 1.05
+  },
+  "H2": {
+    "type": "gas",
+    "density_kg_m3": 0.082,
+    "viscosity_cP": 0.0089
+  },
+  "CO2": {
+    "type": "gas",
+    "density_kg_m3": 1.80,
+    "viscosity_cP": 0.0149
+  },
+  "N2": {
+    "type": "gas",
+    "density_kg_m3": 1.14,
+    "viscosity_cP": 0.0178
+  },
+  "CH4": {
+    "type": "gas",
+    "density_kg_m3": 0.66,
+    "viscosity_cP": 0.0111
+  },
+  "Oil (light, generic)": {
+    "type": "liquid",
+    "density_kg_m3": 850.0,
+    "viscosity_cP": 5.0
+  }
+}

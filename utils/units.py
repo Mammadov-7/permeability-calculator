@@ -47,6 +47,12 @@ VISCOSITY_TO_CP = {
     "Pa·s":  1000.0,
     "mPa·s": 1.0,   # 1 mPa·s ≡ 1 cP
 }
+DENSITY_TO_KGM3 = {
+    "kg/m³": 1.0,
+    "g/cm³": 1000.0,
+    "g/L":   1.0,
+    "lb/ft³": 16.0185,
+}
 
 # ── Compressibility → 1/Pa ───────────────────────────────────────────────────
 COMPRESSIBILITY_TO_INV_PA = {
