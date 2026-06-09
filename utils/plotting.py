@@ -6,15 +6,16 @@ Visual aesthetic mirrors PermCalc's existing inline charts:
     - Courier New typography throughout
     - teal  #2DD4BF for injected phase / primary data
     - orange #FB923C for displaced phase / secondary data
-    - red   #DC2626 for reference lines (breakthrough, target, etc.)
+    - red   #DC2626 for reference / measured / target
 
 Functions
 ---------
-build_kr_chart            : static kr_inj / kr_disp vs S_inj.
-build_pc_chart            : static Brooks-Corey Pc(S_inj), semi-log.
-build_dp_time_chart       : animated ΔP vs time (PermCalc-style).
-build_profile_animation   : animated S_inj(x), with slider.
-render_chart_html         : Plotly figure -> HTML string (+ autoplay).
+build_kr_chart              : static kr_inj / kr_disp vs S_inj.
+build_pc_chart              : static Brooks-Corey Pc(S_inj), semi-log.
+build_dp_time_chart         : animated ΔP vs time.
+build_profile_animation     : animated S_inj(x), with slider.
+build_history_match_chart   : measured ΔP (markers) + simulated ΔP (line).
+render_chart_html           : Plotly figure -> HTML string (+ autoplay).
 """
 
 import numpy as np
@@ -75,7 +76,6 @@ def _apply_layout(fig, x_title, y_title, x_range, y_range, title,
 
 # ── kr chart (static) ───────────────────────────────────────────────────────
 def build_kr_chart(kr_data, inj_name="Injected", disp_name="Displaced"):
-    """`kr_data` = output of utils.twophase.kr_curves(tp_inputs)."""
     S = kr_data["S_inj"]
     fig = go.Figure([
         go.Scatter(
@@ -122,12 +122,11 @@ def build_kr_chart(kr_data, inj_name="Injected", disp_name="Displaced"):
 
 # ── Pc chart (static, semi-log) ─────────────────────────────────────────────
 def build_pc_chart(pc_data, S_inj_r, S_disp_r):
-    """`pc_data` = output of utils.twophase.pc_curve(tp_inputs)."""
     S  = pc_data["S_inj"]
     Pc = pc_data["Pc_mbar"]
     mask = (S >= S_inj_r) & (S <= 1.0 - S_disp_r)
-    Sm  = S[mask]
-    Pm  = Pc[mask]
+    Sm = S[mask]
+    Pm = Pc[mask]
     fig = go.Figure([
         go.Scatter(
             x=Sm, y=Pm, mode="lines",
@@ -169,7 +168,6 @@ def build_dp_time_chart(results):
         )
         for i in frame_indices
     ]
-
     fig = go.Figure(
         data=[go.Scatter(
             x=[t[0]], y=[dp[0]], mode="lines",
@@ -178,7 +176,6 @@ def build_dp_time_chart(results):
         )],
         frames=frames,
     )
-
     bt_time = results.get("BT_time_min")
     if bt_time is not None:
         fig.add_vline(
@@ -188,7 +185,6 @@ def build_dp_time_chart(results):
             annotation_position="top right",
             annotation_font=ANNOT_FONT,
         )
-
     y_max = float(np.nanmax(dp)) * 1.10
     _apply_layout(
         fig,
@@ -236,7 +232,6 @@ def build_profile_animation(results):
         )],
         frames=frames,
     )
-
     fig.update_layout(
         sliders=[dict(
             active=0,
@@ -258,7 +253,6 @@ def build_profile_animation(results):
             ],
         )],
     )
-
     _apply_layout(
         fig,
         "<b>x [cm]</b>", "<b>S_inj  [-]</b>",
@@ -270,7 +264,53 @@ def build_profile_animation(results):
     return fig
 
 
-# ── HTML conversion + optional autoplay (copied pattern from PermCalc) ─────
+# ── History-match (measured markers + fitted line) ─────────────────────────
+def build_history_match_chart(measured_t_min, measured_dp_mbar, sim_results):
+    sim_t  = sim_results["t_min"]
+    sim_dp = sim_results["dP_mbar"]
+    measured_t  = np.asarray(measured_t_min,  dtype=float)
+    measured_dp = np.asarray(measured_dp_mbar, dtype=float)
+
+    fig = go.Figure([
+        go.Scatter(
+            x=measured_t, y=measured_dp,
+            mode="markers",
+            marker=dict(color=COLOR_REF, size=7,
+                        line=dict(color=COLOR_AXIS, width=0.5)),
+            name="measured",
+            hovertemplate="t=%{x:.2f} min<br>ΔP=%{y:.2f} mbar<extra></extra>",
+        ),
+        go.Scatter(
+            x=sim_t, y=sim_dp, mode="lines",
+            line=dict(color=COLOR_INJ, width=2.8),
+            name="fitted",
+            hovertemplate="t=%{x:.2f} min<br>ΔP=%{y:.2f} mbar<extra></extra>",
+        ),
+    ])
+    bt_time = sim_results.get("BT_time_min")
+    if bt_time is not None:
+        fig.add_vline(
+            x=bt_time,
+            line=dict(color=COLOR_AXIS, width=1, dash="dot"),
+            annotation_text=f"BT at {bt_time:.2f} min",
+            annotation_font=dict(color=COLOR_AXIS,
+                                 family="Courier New", size=11),
+            annotation_position="top right",
+        )
+    x_max = max(float(sim_t[-1]), float(np.max(measured_t)))
+    y_max = max(float(np.nanmax(sim_dp)),
+                float(np.nanmax(measured_dp))) * 1.10
+    _apply_layout(
+        fig,
+        "<b>Time [min]</b>", "<b>ΔP [mbar]</b>",
+        (0.0, x_max), (0.0, y_max),
+        "History match — measured vs fitted",
+        showlegend=True,
+    )
+    return fig
+
+
+# ── HTML conversion + optional autoplay ────────────────────────────────────
 def render_chart_html(fig, autoplay=False):
     html_str = pio.to_html(
         fig,
