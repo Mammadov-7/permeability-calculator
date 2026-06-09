@@ -1,17 +1,25 @@
 """
 CoreFlood Lab — Two-Phase (Relative Permeability) Tool
-Step 3: Input panel complete. Forward/inverse simulation added in later steps.
+Step 6: kr/Pc preview + forward-simulation visualizations.
 """
 
 import math
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from utils.phases import phase_picker, io_buttons
 from utils.units import (
     LENGTH_TO_CM, POROSITY_TO_FRACTION,
     VOLUME_TO_ML, TIME_TO_MIN, PRESSURE_TO_BAR, DP_TO_MBAR,
     convert, convert_injection_rate,
+)
+from utils.twophase import kr_curves, pc_curve
+from utils.twophase_solver import run_forward
+from utils.plotting import (
+    build_kr_chart, build_pc_chart,
+    build_dp_time_chart, build_profile_animation,
+    render_chart_html,
 )
 
 # Stop-gap: permeability units (promote into utils/units.py in a later step)
@@ -63,13 +71,9 @@ html, body, [class*="css"] { font-family: 'Courier New', monospace; }
 
 .debug-box {
     background: #0F1A1F; border-left: 4px solid #2DD4BF;
-    padding: 24px 28px; margin: 0.6rem 0;
+    padding: 18px 22px; margin: 0.6rem 0;
     color: #C9D1D9 !important;
-    font-size: 22px !important; line-height: 1.9 !important;
-}
-.debug-box * {
-    font-size: 22px !important;
-    line-height: 1.9 !important;
+    font-size: 13px !important; line-height: 1.7 !important;
 }
 .debug-box code { color: #2DD4BF !important; }
 .debug-box b    { color: #F0F4F8 !important; }
@@ -78,6 +82,13 @@ html, body, [class*="css"] { font-family: 'Courier New', monospace; }
     padding: 10px 14px; margin: 0.5rem 0;
     color: #FB923C; font-size: 12px;
 }
+.metric-card {
+    background: #0F1A1F; border-left: 4px solid #2DD4BF;
+    padding: 14px 18px; margin: 0.4rem 0;
+    color: #C9D1D9; font-size: 13px;
+}
+.metric-card b { color: #F0F4F8; }
+.metric-card code { color: #2DD4BF; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -130,7 +141,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Optional: custom phase library import/export ────────────────────────────
+# ── Phase library import/export ─────────────────────────────────────────────
 with st.expander("Phase library (download / upload custom phases)",
                  expanded=False):
     io_buttons()
@@ -138,7 +149,6 @@ with st.expander("Phase library (download / upload custom phases)",
 # ── Phase selection ─────────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ PHASE SELECTION</div>',
             unsafe_allow_html=True)
-
 col_inj, col_res = st.columns(2)
 with col_inj:
     st.markdown('<div class="group-label">Injected phase</div>',
@@ -160,7 +170,6 @@ if injected["type"] == displaced["type"]:
 # ── Saturation endpoints ────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ SATURATION ENDPOINTS</div>',
             unsafe_allow_html=True)
-
 col_si, col_sd = st.columns(2)
 with col_si:
     st.markdown('<div class="group-label">Injected phase</div>',
@@ -181,8 +190,9 @@ with col_sd:
 
 s_inj_r  = convert(s_inj_r_val,  s_inj_r_u,  POROSITY_TO_FRACTION)
 s_disp_r = convert(s_disp_r_val, s_disp_r_u, POROSITY_TO_FRACTION)
+mobile_range = 1.0 - s_inj_r - s_disp_r
 
-if s_inj_r + s_disp_r >= 1.0:
+if mobile_range <= 0:
     st.markdown(
         f'<div class="warn-box">⚠ S_r,inj + S_r,disp = '
         f'<b>{s_inj_r + s_disp_r:.3f}</b> ≥ 1.0 — no mobile saturation '
@@ -193,7 +203,6 @@ if s_inj_r + s_disp_r >= 1.0:
 # ── Corey kr parameters ─────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ COREY kr PARAMETERS</div>',
             unsafe_allow_html=True)
-
 col_ki, col_kd = st.columns(2)
 with col_ki:
     st.markdown('<div class="group-label">Injected phase</div>',
@@ -222,15 +231,13 @@ with col_kd:
         help="Curvature of kr curve. n=1 linear, n=2 quadratic.",
     )
 
-# ── Capillary pressure (optional) ───────────────────────────────────────────
+# ── Capillary pressure ──────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ CAPILLARY PRESSURE</div>',
             unsafe_allow_html=True)
-
 pc_enabled = st.checkbox(
     "Include capillary pressure (Brooks–Corey)",
     value=False, key="pc_enabled",
 )
-
 pc_entry_mbar = None
 pc_lambda     = None
 if pc_enabled:
@@ -239,26 +246,22 @@ if pc_enabled:
         pc_entry_val, pc_entry_u = _input_row(
             "Entry pressure P_e", 100.0, DP_TO_MBAR,
             "pc_entry", default_unit="mbar",
-            help="Brooks–Corey entry/threshold pressure.",
         )
         pc_entry_mbar = convert(pc_entry_val, pc_entry_u, DP_TO_MBAR)
     with col_pl:
         pc_lambda = _dim_row(
             "Pore-size index λ", 2.0, "pc_lambda",
             min_value=0.1, max_value=10.0, step=0.1, fmt="%.2f",
-            help="Brooks–Corey pore-size distribution index. "
-                 "Smaller λ → wider pore-size distribution.",
         )
 
 # ── Rock & core geometry ────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ ROCK & CORE GEOMETRY</div>',
             unsafe_allow_html=True)
-
-L_val, L_u     = _input_row("Length L",        10.0,  LENGTH_TO_CM,
+L_val, L_u     = _input_row("Length L",         10.0,  LENGTH_TO_CM,
                             "core_L", default_unit="cm")
-D_val, D_u     = _input_row("Diameter D",      3.8,   LENGTH_TO_CM,
+D_val, D_u     = _input_row("Diameter D",       3.8,   LENGTH_TO_CM,
                             "core_D", default_unit="cm")
-phi_val, phi_u = _input_row("Porosity φ",      20.0,  POROSITY_TO_FRACTION,
+phi_val, phi_u = _input_row("Porosity φ",       20.0,  POROSITY_TO_FRACTION,
                             "core_phi", default_unit="%")
 k_val, k_u     = _input_row("Absolute perm. k", 100.0, PERMEABILITY_TO_MD,
                             "core_k", default_unit="mD")
@@ -272,8 +275,6 @@ A_cm2 = math.pi * (D_cm ** 2) / 4.0
 # ── Operating conditions ────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ OPERATING CONDITIONS</div>',
             unsafe_allow_html=True)
-
-# Injection rate: split volume + time selectors
 c1, c2, c3, c4 = st.columns([1.2, 1.5, 0.5, 0.5])
 with c1:
     st.markdown('<div class="row-label">Injection rate q</div>',
@@ -295,22 +296,17 @@ with c4:
     )
 q_ml_min = convert_injection_rate(q_val, q_vol_u, q_time_u)
 
-p_back_val, p_back_u   = _input_row(
-    "Back pressure P_out", 1.0,  PRESSURE_TO_BAR,
-    "op_pback",  default_unit="bar",
-)
-t_total_val, t_total_u = _input_row(
-    "Total time", 60.0, TIME_TO_MIN,
-    "op_ttotal", default_unit="min",
-)
-
+p_back_val, p_back_u   = _input_row("Back pressure P_out", 1.0,
+                                    PRESSURE_TO_BAR, "op_pback",
+                                    default_unit="bar")
+t_total_val, t_total_u = _input_row("Total time", 60.0, TIME_TO_MIN,
+                                    "op_ttotal", default_unit="min")
 p_back_bar  = convert(p_back_val,  p_back_u,  PRESSURE_TO_BAR)
 t_total_min = convert(t_total_val, t_total_u, TIME_TO_MIN)
 
 # ── Numerical ───────────────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ NUMERICAL</div>',
             unsafe_allow_html=True)
-
 n_cells = st.number_input(
     "Grid cells N",
     min_value=20, max_value=500, value=100, step=10,
@@ -320,7 +316,7 @@ n_cells = st.number_input(
          "200+ for publication-grade plots.",
 )
 
-# ── Stash everything in session_state for later steps ──────────────────────
+# ── Stash everything in session_state for the simulator ────────────────────
 st.session_state["tp_inputs"] = {
     "injected":  injected,
     "displaced": displaced,
@@ -354,55 +350,140 @@ st.session_state["tp_inputs"] = {
     },
 }
 
-# ── Debug readout ───────────────────────────────────────────────────────────
-st.markdown('<div class="section-label">▌ COLLECTED INPUTS (debug readout)</div>',
+# ── Collapsed debug readout ─────────────────────────────────────────────────
+with st.expander("Collected inputs (debug)", expanded=False):
+    pc_line = (
+        f'<b>Pc:</b> Brooks–Corey, '
+        f'P_e = <code>{pc_entry_mbar:.2f} mbar</code>, '
+        f'λ = <code>{pc_lambda:.2f}</code>'
+        if pc_enabled else
+        '<b>Pc:</b> <code>off</code>'
+    )
+    st.markdown(
+        f'<div class="debug-box">'
+        f'<b>Injected:</b> {injected["name"]} ({injected["type"]}) — '
+        f'ρ = <code>{injected["density_kg_m3"]:.3f} kg/m³</code>, '
+        f'μ = <code>{injected["viscosity_cP"]:.4f} cP</code><br>'
+        f'<b>Displaced:</b> {displaced["name"]} ({displaced["type"]}) — '
+        f'ρ = <code>{displaced["density_kg_m3"]:.3f} kg/m³</code>, '
+        f'μ = <code>{displaced["viscosity_cP"]:.4f} cP</code><br>'
+        f'<b>Saturations:</b> S_r,inj = <code>{s_inj_r:.3f}</code>, '
+        f'S_r,disp = <code>{s_disp_r:.3f}</code>, '
+        f'mobile = <code>{mobile_range:.3f}</code><br>'
+        f'<b>kr:</b> kr_max,inj=<code>{kr_inj_max:.3f}</code>, '
+        f'n_inj=<code>{n_inj:.2f}</code>; '
+        f'kr_max,disp=<code>{kr_disp_max:.3f}</code>, '
+        f'n_disp=<code>{n_disp:.2f}</code><br>'
+        f'{pc_line}<br>'
+        f'<b>Core:</b> L=<code>{L_cm:.2f} cm</code>, '
+        f'D=<code>{D_cm:.2f} cm</code> '
+        f'(A=<code>{A_cm2:.3f} cm²</code>), '
+        f'φ=<code>{phi:.3f}</code>, k=<code>{k_mD:.2f} mD</code><br>'
+        f'<b>Operating:</b> q=<code>{q_ml_min:.4f} ml/min</code>, '
+        f'P_back=<code>{p_back_bar:.3f} bar</code>, '
+        f't_total=<code>{t_total_min:.2f} min</code><br>'
+        f'<b>Numerical:</b> N=<code>{int(n_cells)}</code> cells'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+# ── kr / Pc preview (live) ──────────────────────────────────────────────────
+st.markdown('<div class="section-label">▌ kr / Pc PREVIEW</div>',
             unsafe_allow_html=True)
 
-pc_line = (
-    f'<b>Pc:</b> Brooks–Corey, '
-    f'P_e = <code>{pc_entry_mbar:.2f} mbar</code>, '
-    f'λ = <code>{pc_lambda:.2f}</code>'
-    if pc_enabled else
-    '<b>Pc:</b> <code>off</code>'
-)
+if mobile_range <= 0:
+    st.markdown(
+        '<div class="warn-box">Cannot draw curves: residual saturations '
+        'leave no mobile range.</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    kr_data = kr_curves(st.session_state["tp_inputs"])
+    fig_kr  = build_kr_chart(
+        kr_data, inj_name=injected["name"], disp_name=displaced["name"],
+    )
+    components.html(render_chart_html(fig_kr), height=410, scrolling=False)
 
-st.markdown(
-    f'<div class="debug-box">'
-    f'<b>Injected:</b> {injected["name"]} ({injected["type"]}) — '
-    f'ρ = <code>{injected["density_kg_m3"]:.3f} kg/m³</code>, '
-    f'μ = <code>{injected["viscosity_cP"]:.4f} cP</code><br>'
-    f'<b>Displaced:</b> {displaced["name"]} ({displaced["type"]}) — '
-    f'ρ = <code>{displaced["density_kg_m3"]:.3f} kg/m³</code>, '
-    f'μ = <code>{displaced["viscosity_cP"]:.4f} cP</code><br>'
-    f'<b>Saturations:</b> S_r,inj = <code>{s_inj_r:.3f}</code>, '
-    f'S_r,disp = <code>{s_disp_r:.3f}</code>, '
-    f'mobile range = <code>{1 - s_inj_r - s_disp_r:.3f}</code><br>'
-    f'<b>kr (Corey):</b> '
-    f'kr_max,inj = <code>{kr_inj_max:.3f}</code>, n_inj = <code>{n_inj:.2f}</code>; '
-    f'kr_max,disp = <code>{kr_disp_max:.3f}</code>, n_disp = <code>{n_disp:.2f}</code><br>'
-    f'{pc_line}<br>'
-    f'<b>Core:</b> L = <code>{L_cm:.2f} cm</code>, '
-    f'D = <code>{D_cm:.2f} cm</code> '
-    f'(A = <code>{A_cm2:.3f} cm²</code>), '
-    f'φ = <code>{phi:.3f}</code>, '
-    f'k = <code>{k_mD:.2f} mD</code><br>'
-    f'<b>Operating:</b> q = <code>{q_ml_min:.4f} ml/min</code>, '
-    f'P_back = <code>{p_back_bar:.3f} bar</code>, '
-    f't_total = <code>{t_total_min:.2f} min</code><br>'
-    f'<b>Numerical:</b> N = <code>{int(n_cells)}</code> cells'
-    f'</div>',
-    unsafe_allow_html=True,
-)
+    if pc_enabled:
+        pc_data = pc_curve(st.session_state["tp_inputs"])
+        fig_pc  = build_pc_chart(pc_data, s_inj_r, s_disp_r)
+        components.html(render_chart_html(fig_pc), height=410, scrolling=False)
 
-# ── Status ──────────────────────────────────────────────────────────────────
-st.markdown('<div class="section-label">▌ STATUS</div>',
+# ── Forward simulation ──────────────────────────────────────────────────────
+st.markdown('<div class="section-label">▌ FORWARD SIMULATION</div>',
             unsafe_allow_html=True)
-st.markdown(
-    '<div class="debug-box">'
-    'Step 3 complete — all inputs collected and stashed in '
-    '<code>st.session_state["tp_inputs"]</code>. Coming next: Corey kr '
-    'and Brooks–Corey Pc functions in <code>utils/twophase.py</code>, then '
-    'the 1D IMPES forward simulator.'
-    '</div>',
-    unsafe_allow_html=True,
-)
+
+if mobile_range <= 0:
+    st.markdown(
+        '<div class="warn-box">Cannot simulate: residual saturations '
+        'leave no mobile range.</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    run_clicked = st.button(
+        "▶  Run Forward Simulation", type="primary", key="run_forward",
+    )
+
+    if run_clicked:
+        with st.spinner("Running 1D IMPES forward simulation…"):
+            try:
+                st.session_state["tp_results"] = run_forward(
+                    st.session_state["tp_inputs"]
+                )
+                st.session_state["tp_results_error"] = None
+            except Exception as e:
+                st.session_state["tp_results"] = None
+                st.session_state["tp_results_error"] = str(e)
+
+    if st.session_state.get("tp_results_error"):
+        st.error(f"Simulation failed: {st.session_state['tp_results_error']}")
+
+    results = st.session_state.get("tp_results")
+    if results is not None:
+        bt_pvi  = results["BT_PVI"]
+        bt_time = results["BT_time_min"]
+        dp_init = float(results["dP_mbar"][0])
+        dp_end  = float(results["dP_mbar"][-1])
+        bt_line = (
+            f'BT at <code>{bt_time:.2f} min</code> '
+            f'(PVI=<code>{bt_pvi:.3f}</code>)'
+            if bt_pvi is not None else
+            '<code>no breakthrough within t_total</code>'
+        )
+        st.markdown(
+            f'<div class="metric-card">'
+            f'<b>Run summary:</b> '
+            f'PV=<code>{results["PV_ml"]:.2f} ml</code>, '
+            f'N=<code>{results["N"]}</code>, '
+            f'inner steps=<code>{results["n_steps"]}</code>, '
+            f'snapshots=<code>{len(results["t_min"])}</code><br>'
+            f'<b>Breakthrough:</b> {bt_line}<br>'
+            f'<b>ΔP:</b> initial=<code>{dp_init:.2f} mbar</code>, '
+            f'final=<code>{dp_end:.2f} mbar</code>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ΔP vs time (animated, autoplay)
+        fig_dp = build_dp_time_chart(results)
+        components.html(
+            render_chart_html(fig_dp, autoplay=True),
+            height=450, scrolling=False,
+        )
+
+        # Saturation profile (animated, with slider)
+        fig_prof = build_profile_animation(results)
+        components.html(
+            render_chart_html(fig_prof, autoplay=False),
+            height=480, scrolling=False,
+        )
+
+        st.caption(
+            "Charts above reflect the last ‘Run’ click. "
+            "Change inputs and click Run again to refresh."
+        )
+    else:
+        st.caption(
+            "Click ‘Run Forward Simulation’ to generate ΔP history "
+            "and saturation profile."
+        )
