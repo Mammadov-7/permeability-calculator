@@ -2,19 +2,20 @@
 Unit-conversion helpers for the permeability calculator.
 
 Each table maps a unit string to the multiplier that converts a value
-expressed in that unit into the base unit used by
-`calculators.absolute_perm.match_permeability`.
+expressed in that unit into the base unit used by the solvers.
 
-Base units (matching the solver's expected inputs):
+Base units:
     Length          -> cm
-    Area            -> cm^2
+    Area            -> cm²
     Porosity        -> fraction (0..1)
     Viscosity       -> cP
+    Density         -> kg/m³
     Compressibility -> 1/Pa
     Volume          -> ml
     Time            -> min
-    Back pressure   -> bar
+    Pressure        -> bar
     Pressure drop   -> mbar
+    Permeability    -> mD
 """
 
 # ── Length → cm ──────────────────────────────────────────────────────────────
@@ -45,12 +46,14 @@ POROSITY_TO_FRACTION = {
 VISCOSITY_TO_CP = {
     "cP":    1.0,
     "Pa·s":  1000.0,
-    "mPa·s": 1.0,   # 1 mPa·s ≡ 1 cP
+    "mPa·s": 1.0,
 }
+
+# ── Density → kg/m³ ─────────────────────────────────────────────────────────
 DENSITY_TO_KGM3 = {
-    "kg/m³": 1.0,
-    "g/cm³": 1000.0,
-    "g/L":   1.0,
+    "kg/m³":  1.0,
+    "g/cm³":  1000.0,
+    "g/L":    1.0,
     "lb/ft³": 16.0185,
 }
 
@@ -67,7 +70,7 @@ VOLUME_TO_ML = {
     "cm³": 1.0,
     "l":   1000.0,
     "m³":  1e6,
-    "bbl": 158_987.295,  # oil barrel (US)
+    "bbl": 158_987.295,
 }
 
 # ── Time → min ───────────────────────────────────────────────────────────────
@@ -96,6 +99,14 @@ DP_TO_MBAR = {
     "kPa":  10.0,
 }
 
+# ── Permeability → mD ────────────────────────────────────────────────────────
+# 1 darcy = 9.869233e-13 m² => 1 m² = 1.01325e15 mD
+PERMEABILITY_TO_MD = {
+    "mD": 1.0,
+    "D":  1000.0,
+    "m²": 1.01325e15,
+}
+
 
 def convert(value: float, unit: str, table: dict) -> float:
     """Convert `value` from `unit` to the base unit defined by `table`."""
@@ -106,12 +117,9 @@ def convert(value: float, unit: str, table: dict) -> float:
     return value * table[unit]
 
 
-def convert_injection_rate(value: float, volume_unit: str, time_unit: str) -> float:
-    """
-    Convert an injection rate (volume / time) to ml/min.
-
-    Example: convert_injection_rate(1.0, "m³", "s") -> 60_000_000 ml/min
-    """
+def convert_injection_rate(value: float, volume_unit: str,
+                           time_unit: str) -> float:
+    """Convert an injection rate (volume / time) to ml/min."""
     volume_in_ml = convert(value, volume_unit, VOLUME_TO_ML)
-    time_in_min = convert(1.0, time_unit, TIME_TO_MIN)
+    time_in_min  = convert(1.0, time_unit, TIME_TO_MIN)
     return volume_in_ml / time_in_min

@@ -1,9 +1,24 @@
 """
-CoreFlood Lab — Two-Phase (Relative Permeability) Tool
-Step 7: Forward + Inverse modes via tabs.
+CoreFlood Lab — Two-Phase (Relative Permeability) Tool.
+
+A 1D IMPES forward simulator and Nelder–Mead inverse fitter for
+relative permeability and capillary pressure analysis of core-flood
+experiments. Inputs are collected at the top of the page; results
+appear in the Forward and Inverse tabs below.
+
+Module map
+----------
+utils.twophase          : Corey kr and Brooks-Corey Pc functions.
+utils.twophase_solver   : 1D IMPES forward simulator.
+utils.twophase_inverse  : Nelder-Mead optimizer for kr back-fitting.
+utils.plotting          : Plotly chart builders.
+utils.phases            : Phase library + phase-picker widget.
+utils.units             : Unit-conversion tables and helpers.
 """
 
+import hashlib
 import io
+import json
 import math
 
 import numpy as np
@@ -13,7 +28,7 @@ import streamlit.components.v1 as components
 
 from utils.phases import phase_picker, io_buttons
 from utils.units import (
-    LENGTH_TO_CM, POROSITY_TO_FRACTION,
+    LENGTH_TO_CM, POROSITY_TO_FRACTION, PERMEABILITY_TO_MD,
     VOLUME_TO_ML, TIME_TO_MIN, PRESSURE_TO_BAR, DP_TO_MBAR,
     convert, convert_injection_rate,
 )
@@ -26,13 +41,6 @@ from utils.plotting import (
     build_history_match_chart,
     render_chart_html,
 )
-
-# Stop-gap: permeability units (promote into utils/units.py later)
-PERMEABILITY_TO_MD = {
-    "mD": 1.0,
-    "D":  1000.0,
-    "m²": 1.01325e15,
-}
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -87,6 +95,11 @@ html, body, [class*="css"] { font-family: 'Courier New', monospace; }
     padding: 10px 14px; margin: 0.5rem 0;
     color: #FB923C; font-size: 12px;
 }
+.error-box {
+    background: #2A0F0F; border-left: 3px solid #DC2626;
+    padding: 10px 14px; margin: 0.5rem 0;
+    color: #FCA5A5; font-size: 12px;
+}
 .metric-card {
     background: #0F1A1F; border-left: 4px solid #2DD4BF;
     padding: 14px 18px; margin: 0.4rem 0;
@@ -137,6 +150,13 @@ def _dim_row(label, default, key_prefix, fmt="%g",
         return st.number_input(label, **kwargs)
 
 
+def _inputs_hash(d: dict) -> str:
+    """Short stable hash of the inputs dict for stale-results detection."""
+    return hashlib.md5(
+        json.dumps(d, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:10]
+
+
 # ── Header ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="app-header">
@@ -181,6 +201,8 @@ with col_si:
     s_inj_r_val, s_inj_r_u = _input_row(
         "S_r (residual)", 0.0, POROSITY_TO_FRACTION,
         "s_inj_r", default_unit="fraction",
+        help="Residual saturation of the injected phase; kr_inj = 0 "
+             "at and below this saturation.",
     )
 with col_sd:
     st.markdown('<div class="group-label">Displaced phase</div>',
@@ -188,16 +210,12 @@ with col_sd:
     s_disp_r_val, s_disp_r_u = _input_row(
         "S_r (residual)", 0.20, POROSITY_TO_FRACTION,
         "s_disp_r", default_unit="fraction",
+        help="Residual saturation of the displaced phase that cannot "
+             "be swept by injection.",
     )
 s_inj_r  = convert(s_inj_r_val,  s_inj_r_u,  POROSITY_TO_FRACTION)
 s_disp_r = convert(s_disp_r_val, s_disp_r_u, POROSITY_TO_FRACTION)
 mobile_range = 1.0 - s_inj_r - s_disp_r
-if mobile_range <= 0:
-    st.markdown(
-        f'<div class="warn-box">⚠ S_r,inj + S_r,disp = '
-        f'<b>{s_inj_r + s_disp_r:.3f}</b> ≥ 1.0 — no mobile range.</div>',
-        unsafe_allow_html=True,
-    )
 
 # ── Corey kr parameters ─────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ COREY kr PARAMETERS '
@@ -207,23 +225,42 @@ col_ki, col_kd = st.columns(2)
 with col_ki:
     st.markdown('<div class="group-label">Injected phase</div>',
                 unsafe_allow_html=True)
-    kr_inj_max = _dim_row("End-point kr_max", 0.6, "kr_inj_max",
-                          min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f")
-    n_inj      = _dim_row("Corey exponent n", 2.0, "n_inj",
-                          min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f")
+    kr_inj_max = _dim_row(
+        "End-point kr_max", 0.6, "kr_inj_max",
+        min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f",
+        help="kr of injected phase at S_inj = 1 − S_r,disp (max sweep).",
+    )
+    n_inj = _dim_row(
+        "Corey exponent n", 2.0, "n_inj",
+        min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f",
+        help="Curvature of kr curve: n=1 linear, n=2 quadratic, "
+             "higher = sharper front.",
+    )
 with col_kd:
     st.markdown('<div class="group-label">Displaced phase</div>',
                 unsafe_allow_html=True)
-    kr_disp_max = _dim_row("End-point kr_max", 1.0, "kr_disp_max",
-                           min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f")
-    n_disp      = _dim_row("Corey exponent n", 3.0, "n_disp",
-                           min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f")
+    kr_disp_max = _dim_row(
+        "End-point kr_max", 1.0, "kr_disp_max",
+        min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f",
+        help="kr of displaced phase at S_inj = S_r,inj (no sweep).",
+    )
+    n_disp = _dim_row(
+        "Corey exponent n", 3.0, "n_disp",
+        min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f",
+        help="Curvature of kr curve: n=1 linear, n=2 quadratic, "
+             "higher = sharper front.",
+    )
 
 # ── Capillary pressure ──────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ CAPILLARY PRESSURE</div>',
             unsafe_allow_html=True)
-pc_enabled = st.checkbox("Include capillary pressure (Brooks–Corey)",
-                         value=False, key="pc_enabled")
+pc_enabled = st.checkbox(
+    "Include capillary pressure (Brooks–Corey)",
+    value=False, key="pc_enabled",
+    help="When enabled, the simulator includes a capillary-diffusion "
+         "term that smooths the saturation front. Each forward call "
+         "becomes significantly slower.",
+)
 pc_entry_mbar = None
 pc_lambda     = None
 if pc_enabled:
@@ -232,12 +269,17 @@ if pc_enabled:
         pc_entry_val, pc_entry_u = _input_row(
             "Entry pressure P_e", 100.0, DP_TO_MBAR,
             "pc_entry", default_unit="mbar",
+            help="Brooks–Corey threshold entry pressure of the "
+                 "non-wetting (injected) phase.",
         )
         pc_entry_mbar = convert(pc_entry_val, pc_entry_u, DP_TO_MBAR)
     with col_pl:
-        pc_lambda = _dim_row("Pore-size index λ", 2.0, "pc_lambda",
-                             min_value=0.1, max_value=10.0, step=0.1,
-                             fmt="%.2f")
+        pc_lambda = _dim_row(
+            "Pore-size index λ", 2.0, "pc_lambda",
+            min_value=0.1, max_value=10.0, step=0.1, fmt="%.2f",
+            help="Brooks–Corey pore-size distribution index. "
+                 "Smaller λ ⇒ wider pore-size distribution.",
+        )
 
 # ── Rock & core geometry ────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ ROCK & CORE GEOMETRY</div>',
@@ -284,8 +326,13 @@ t_total_min = convert(t_total_val, t_total_u, TIME_TO_MIN)
 # ── Numerical ───────────────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ NUMERICAL</div>',
             unsafe_allow_html=True)
-n_cells = st.number_input("Grid cells N", min_value=20, max_value=500,
-                          value=100, step=10, key="n_cells")
+n_cells = st.number_input(
+    "Grid cells N", min_value=20, max_value=500, value=100, step=10,
+    key="n_cells",
+    help="Number of 1D finite-difference cells. More cells = sharper "
+         "front but slower runs. 100 is a sensible default; use 200+ "
+         "for publication-grade plots.",
+)
 
 # ── Stash inputs in session_state ───────────────────────────────────────────
 st.session_state["tp_inputs"] = {
@@ -303,8 +350,40 @@ st.session_state["tp_inputs"] = {
                   "t_total_min": t_total_min},
     "numerical": {"N_cells": int(n_cells)},
 }
+cur_hash = _inputs_hash(st.session_state["tp_inputs"])
 
-# Collapsed debug
+# ── Validation ──────────────────────────────────────────────────────────────
+input_errors = []
+if mobile_range <= 0:
+    input_errors.append(
+        f"S_r,inj + S_r,disp = {s_inj_r + s_disp_r:.3f} ≥ 1.0 — "
+        f"no mobile saturation range."
+    )
+if L_cm    <= 0: input_errors.append("Length must be > 0.")
+if D_cm    <= 0: input_errors.append("Diameter must be > 0.")
+if phi <= 0 or phi >= 1:
+    input_errors.append("Porosity must lie strictly between 0 and 1.")
+if k_mD       <= 0: input_errors.append("Absolute permeability must be > 0.")
+if q_ml_min   <= 0: input_errors.append("Injection rate must be > 0.")
+if t_total_min <= 0: input_errors.append("Total time must be > 0.")
+if injected["viscosity_cP"]  <= 0 or displaced["viscosity_cP"] <= 0:
+    input_errors.append("Phase viscosities must be > 0.")
+if pc_enabled and pc_entry_mbar is not None and pc_entry_mbar <= 0:
+    input_errors.append("Capillary entry pressure must be > 0.")
+if pc_enabled and pc_lambda is not None and pc_lambda <= 0:
+    input_errors.append("Pore-size index λ must be > 0.")
+
+ready_to_run = len(input_errors) == 0
+
+if input_errors:
+    st.markdown(
+        '<div class="error-box">'
+        + "<br>".join("⛔ " + e for e in input_errors)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+# ── Collapsed debug readout ─────────────────────────────────────────────────
 with st.expander("Collected inputs (debug)", expanded=False):
     pc_line = (
         f'<b>Pc:</b> Brooks–Corey, '
@@ -328,11 +407,11 @@ with st.expander("Collected inputs (debug)", expanded=False):
         f'{pc_line}<br>'
         f'<b>Core:</b> L=<code>{L_cm:.2f} cm</code>, '
         f'D=<code>{D_cm:.2f} cm</code>, '
-        f'φ=<code>{phi:.3f}</code>, '
-        f'k=<code>{k_mD:.2f} mD</code><br>'
+        f'φ=<code>{phi:.3f}</code>, k=<code>{k_mD:.2f} mD</code><br>'
         f'<b>Op:</b> q=<code>{q_ml_min:.4f} ml/min</code>, '
         f't_total=<code>{t_total_min:.2f} min</code>, '
-        f'N=<code>{int(n_cells)}</code>'
+        f'N=<code>{int(n_cells)}</code> · '
+        f'<b>hash:</b> <code>{cur_hash}</code>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -347,13 +426,10 @@ tab_fwd, tab_inv = st.tabs(["⚡  Forward simulation",
 with tab_fwd:
     st.markdown('<div class="section-label">▌ kr / Pc PREVIEW</div>',
                 unsafe_allow_html=True)
-
     if mobile_range <= 0:
-        st.markdown(
-            '<div class="warn-box">No mobile range — adjust residual '
-            'saturations to view curves.</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="warn-box">No mobile range — adjust '
+                    'residual saturations to view curves.</div>',
+                    unsafe_allow_html=True)
     else:
         kr_data = kr_curves(st.session_state["tp_inputs"])
         fig_kr  = build_kr_chart(
@@ -370,81 +446,85 @@ with tab_fwd:
     st.markdown('<div class="section-label">▌ RUN FORWARD</div>',
                 unsafe_allow_html=True)
 
-    if mobile_range <= 0:
-        st.markdown('<div class="warn-box">Cannot simulate — no mobile '
-                    'range.</div>', unsafe_allow_html=True)
-    else:
-        run_clicked = st.button("▶  Run Forward Simulation",
-                                type="primary", key="run_forward")
-        if run_clicked:
-            with st.spinner("Running 1D IMPES forward simulation…"):
-                try:
-                    st.session_state["tp_results"] = run_forward(
-                        st.session_state["tp_inputs"]
-                    )
-                    st.session_state["tp_results_error"] = None
-                except Exception as e:
-                    st.session_state["tp_results"] = None
-                    st.session_state["tp_results_error"] = str(e)
+    run_clicked = st.button(
+        "▶  Run Forward Simulation", type="primary",
+        key="run_forward", disabled=not ready_to_run,
+    )
+    if run_clicked:
+        with st.spinner("Running 1D IMPES forward simulation…"):
+            try:
+                st.session_state["tp_results"] = run_forward(
+                    st.session_state["tp_inputs"]
+                )
+                st.session_state["tp_results_hash"]  = cur_hash
+                st.session_state["tp_results_error"] = None
+            except Exception as e:
+                st.session_state["tp_results"] = None
+                st.session_state["tp_results_error"] = str(e)
 
-        if st.session_state.get("tp_results_error"):
-            st.error(f"Simulation failed: "
-                     f"{st.session_state['tp_results_error']}")
+    if st.session_state.get("tp_results_error"):
+        st.error(f"Simulation failed: "
+                 f"{st.session_state['tp_results_error']}")
 
-        results = st.session_state.get("tp_results")
-        if results is not None:
-            bt_pvi  = results["BT_PVI"]
-            bt_time = results["BT_time_min"]
-            dp_init = float(results["dP_mbar"][0])
-            dp_end  = float(results["dP_mbar"][-1])
-            bt_line = (
-                f'BT at <code>{bt_time:.2f} min</code> '
-                f'(PVI=<code>{bt_pvi:.3f}</code>)'
-                if bt_pvi is not None
-                else '<code>no breakthrough in t_total</code>'
-            )
+    results = st.session_state.get("tp_results")
+    if results is not None:
+        is_stale = st.session_state.get("tp_results_hash") != cur_hash
+        if is_stale:
             st.markdown(
-                f'<div class="metric-card">'
-                f'<b>Run:</b> PV=<code>{results["PV_ml"]:.2f} ml</code>, '
-                f'N=<code>{results["N"]}</code>, '
-                f'steps=<code>{results["n_steps"]}</code><br>'
-                f'<b>BT:</b> {bt_line}<br>'
-                f'<b>ΔP:</b> '
-                f'initial=<code>{dp_init:.2f} mbar</code>, '
-                f'final=<code>{dp_end:.2f} mbar</code>'
-                f'</div>',
+                '<div class="warn-box">⚠ Results below were computed '
+                'with different inputs. Click <b>Run Forward Simulation</b> '
+                'to refresh.</div>',
                 unsafe_allow_html=True,
             )
-            components.html(
-                render_chart_html(build_dp_time_chart(results),
-                                  autoplay=True),
-                height=450, scrolling=False,
-            )
-            components.html(
-                render_chart_html(build_profile_animation(results),
-                                  autoplay=False),
-                height=480, scrolling=False,
-            )
-        else:
-            st.caption("Click ‘Run Forward Simulation’ to generate ΔP "
-                       "history and saturation profile.")
+
+        bt_pvi  = results["BT_PVI"]
+        bt_time = results["BT_time_min"]
+        dp_init = float(results["dP_mbar"][0])
+        dp_end  = float(results["dP_mbar"][-1])
+        bt_line = (
+            f'BT at <code>{bt_time:.2f} min</code> '
+            f'(PVI=<code>{bt_pvi:.3f}</code>)'
+            if bt_pvi is not None
+            else '<code>no breakthrough in t_total</code>'
+        )
+        st.markdown(
+            f'<div class="metric-card">'
+            f'<b>Run:</b> PV=<code>{results["PV_ml"]:.2f} ml</code>, '
+            f'N=<code>{results["N"]}</code>, '
+            f'steps=<code>{results["n_steps"]}</code><br>'
+            f'<b>BT:</b> {bt_line}<br>'
+            f'<b>ΔP:</b> initial=<code>{dp_init:.2f} mbar</code>, '
+            f'final=<code>{dp_end:.2f} mbar</code>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        components.html(
+            render_chart_html(build_dp_time_chart(results), autoplay=True),
+            height=450, scrolling=False,
+        )
+        components.html(
+            render_chart_html(build_profile_animation(results),
+                              autoplay=False),
+            height=480, scrolling=False,
+        )
+    elif ready_to_run:
+        st.caption("Click ‘Run Forward Simulation’ to generate ΔP "
+                   "history and saturation profile.")
 
 # ── INVERSE TAB ─────────────────────────────────────────────────────────────
 with tab_inv:
     st.markdown('<div class="section-label">▌ UPLOAD ΔP(t) DATA</div>',
                 unsafe_allow_html=True)
-
-    st.caption("Expected CSV: at least two columns — time and pressure "
-               "drop. Column names and units are configurable below.")
-
-    uploaded = st.file_uploader("Upload CSV", type=["csv", "txt"],
-                                key="inv_csv",
-                                label_visibility="collapsed")
+    st.caption("Expected CSV: at least two columns (time and pressure "
+               "drop). Column names and units are configurable below.")
+    uploaded = st.file_uploader(
+        "Upload CSV", type=["csv", "txt"], key="inv_csv",
+        label_visibility="collapsed",
+    )
 
     measured_t  = None
     measured_dp = None
     df          = None
-
     if uploaded is not None:
         try:
             df = pd.read_csv(uploaded)
@@ -458,31 +538,35 @@ with tab_inv:
             t_col = st.selectbox("Time column", cols, index=0,
                                  key="inv_tcol")
         with c2:
-            t_unit = st.selectbox("Time unit", list(TIME_TO_MIN.keys()),
-                                  index=list(TIME_TO_MIN.keys()).index("min"),
-                                  key="inv_tunit")
+            t_unit = st.selectbox(
+                "Time unit", list(TIME_TO_MIN.keys()),
+                index=list(TIME_TO_MIN.keys()).index("min"),
+                key="inv_tunit",
+            )
         with c3:
-            dp_col = st.selectbox("ΔP column", cols,
-                                  index=1 if len(cols) > 1 else 0,
-                                  key="inv_dpcol")
+            dp_col = st.selectbox(
+                "ΔP column", cols,
+                index=1 if len(cols) > 1 else 0, key="inv_dpcol",
+            )
         with c4:
-            dp_unit = st.selectbox("ΔP unit",
-                                   list(DP_TO_MBAR.keys()),
-                                   index=list(DP_TO_MBAR.keys()).index("mbar"),
-                                   key="inv_dpunit")
+            dp_unit = st.selectbox(
+                "ΔP unit", list(DP_TO_MBAR.keys()),
+                index=list(DP_TO_MBAR.keys()).index("mbar"),
+                key="inv_dpunit",
+            )
         try:
             raw_t  = pd.to_numeric(df[t_col],  errors="coerce").to_numpy()
             raw_dp = pd.to_numeric(df[dp_col], errors="coerce").to_numpy()
             mask = np.isfinite(raw_t) & np.isfinite(raw_dp)
-            measured_t  = raw_t[mask]  * TIME_TO_MIN[t_unit]   # → min
-            measured_dp = raw_dp[mask] * DP_TO_MBAR[dp_unit]   # → mbar
+            measured_t  = raw_t[mask]  * TIME_TO_MIN[t_unit]
+            measured_dp = raw_dp[mask] * DP_TO_MBAR[dp_unit]
             order = np.argsort(measured_t)
             measured_t, measured_dp = measured_t[order], measured_dp[order]
         except Exception as e:
             st.error(f"Failed to parse selected columns: {e}")
             measured_t, measured_dp = None, None
 
-        if (measured_t is not None and len(measured_t) > 1):
+        if measured_t is not None and len(measured_t) > 1:
             st.markdown(
                 f'<div class="metric-card">'
                 f'<b>Loaded:</b> <code>{len(measured_t)}</code> rows, '
@@ -516,11 +600,12 @@ with tab_inv:
         fit_nd  = st.checkbox("Fit n_disp",      value=True, key="fit_nd")
     fit_mask = (fit_kim, fit_ni, fit_kdm, fit_nd)
 
-    max_iter = st.number_input("Max optimizer iterations", min_value=10,
-                               max_value=500, value=80, step=10,
-                               key="inv_maxiter",
-                               help="Each iteration costs ~1 forward "
-                                    "simulation. Pc enabled = much slower.")
+    max_iter = st.number_input(
+        "Max optimizer iterations", min_value=10, max_value=500,
+        value=80, step=10, key="inv_maxiter",
+        help="Each iteration costs ~1 forward simulation. "
+             "Pc enabled = much slower.",
+    )
 
     if pc_enabled:
         st.markdown(
@@ -532,18 +617,17 @@ with tab_inv:
         )
 
     can_fit = (
-        measured_t is not None
+        ready_to_run
+        and measured_t is not None
         and len(measured_t) > 1
-        and mobile_range > 0
         and any(fit_mask)
     )
-
     if not can_fit:
         reasons = []
+        if not ready_to_run:
+            reasons.append("fix the input errors above")
         if measured_t is None or len(measured_t or []) <= 1:
-            reasons.append("upload a CSV with at least 2 valid rows")
-        if mobile_range <= 0:
-            reasons.append("fix saturation endpoints")
+            reasons.append("upload a CSV with ≥ 2 valid rows")
         if not any(fit_mask):
             reasons.append("select at least one parameter to fit")
         st.caption("To run the fit: " + ", ".join(reasons) + ".")
@@ -556,7 +640,7 @@ with tab_inv:
         bar          = st.progress(0.0)
 
         def _progress(i, sse, params):
-            bar.progress(min(i / max(max_iter * 2, 1), 1.0))
+            bar.progress(min(i / max(int(max_iter) * 2, 1), 1.0))
             progress_box.markdown(
                 f'<div class="metric-card">'
                 f'<b>Iter {i}</b> — SSE=<code>{sse:.3f}</code><br>'
@@ -577,6 +661,7 @@ with tab_inv:
                     max_iter=int(max_iter),
                     on_iter=_progress,
                 )
+                st.session_state["tp_fit_hash"]    = cur_hash
                 st.session_state["tp_measured_t"]  = measured_t
                 st.session_state["tp_measured_dp"] = measured_dp
                 st.session_state["tp_fit_error"]   = None
@@ -591,6 +676,15 @@ with tab_inv:
 
     fit = st.session_state.get("tp_fit")
     if fit is not None:
+        is_stale = st.session_state.get("tp_fit_hash") != cur_hash
+        if is_stale:
+            st.markdown(
+                '<div class="warn-box">⚠ Fit below was computed with '
+                'different inputs. Re-upload data and click <b>Run '
+                'Inverse Fit</b> to refresh.</div>',
+                unsafe_allow_html=True,
+            )
+
         fp = fit["fitted_params"]
         mt = st.session_state["tp_measured_t"]
         md = st.session_state["tp_measured_dp"]
@@ -610,7 +704,6 @@ with tab_inv:
             unsafe_allow_html=True,
         )
 
-        # History-match plot
         components.html(
             render_chart_html(
                 build_history_match_chart(mt, md, fit["results"])
@@ -618,7 +711,6 @@ with tab_inv:
             height=460, scrolling=False,
         )
 
-        # Fitted kr curves
         fitted_inputs = dict(st.session_state["tp_inputs"])
         fitted_inputs["kr"] = {
             "inj_max":  fp["kr_inj_max"],
@@ -635,7 +727,6 @@ with tab_inv:
             height=410, scrolling=False,
         )
 
-        # CSV download of fitted curves + history match
         out_df = pd.DataFrame({
             "S_inj":   kr_fit["S_inj"],
             "kr_inj":  kr_fit["kr_inj"],
@@ -649,6 +740,17 @@ with tab_inv:
             mime="text/csv",
             key="inv_download",
         )
-    else:
-        st.caption("Run a fit to see fitted Corey parameters and "
-                   "history-match plot here.")
+    elif can_fit:
+        st.caption("Click ‘Run Inverse Fit’ to fit Corey parameters "
+                   "against the uploaded data.")
+
+# ── Clear cached results (full-page utility) ────────────────────────────────
+st.markdown("---")
+clear_col_l, clear_col_r = st.columns([3, 1])
+with clear_col_r:
+    if st.button("🗑  Clear cached results", key="clear_results"):
+        for key in ("tp_results", "tp_results_hash", "tp_results_error",
+                    "tp_fit", "tp_fit_hash", "tp_fit_error",
+                    "tp_measured_t", "tp_measured_dp"):
+            st.session_state.pop(key, None)
+        st.rerun()
