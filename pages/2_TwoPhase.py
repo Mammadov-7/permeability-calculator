@@ -498,6 +498,21 @@ with tab_fwd:
             f'</div>',
             unsafe_allow_html=True,
         )
+        # ── CSV export: ΔP(t) history from this forward run ────────────────
+        export_df = pd.DataFrame({
+            "time_min": results["t_min"],
+            "dP_mbar":  results["dP_mbar"],
+        })
+        st.download_button(
+            "⬇  Download ΔP(t) history (.csv)",
+            data=export_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"forward_dP_history_{cur_hash}.csv",
+            mime="text/csv",
+            key="fwd_download_dp",
+            help="Export this forward run's ΔP(t) as a CSV. Load it on the "
+                "Inverse tab to demonstrate the back-fitting workflow.",
+            disabled=is_stale,
+        )
         components.html(
             render_chart_html(build_dp_time_chart(results), autoplay=True),
             height=450, scrolling=False,
