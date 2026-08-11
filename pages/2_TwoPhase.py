@@ -1,7 +1,7 @@
 """
 CoreFlood Lab — Two-Phase (Relative Permeability) Tool.
 
-A 1D IMPES forward simulator and Nelder–Mead inverse fitter for
+A 1D IMPES forward simulator and multi-algorithm inverse fitter for
 relative permeability and capillary pressure analysis of core-flood
 experiments. Inputs are collected at the top of the page; results
 appear in the Forward and Inverse tabs below.
@@ -10,7 +10,8 @@ Module map
 ----------
 utils.twophase          : Corey kr and Brooks-Corey Pc functions.
 utils.twophase_solver   : 1D IMPES forward simulator.
-utils.twophase_inverse  : Nelder-Mead optimizer for kr back-fitting.
+utils.twophase_inverse  : Optimizer dispatcher (Nelder-Mead multi-start,
+                          Differential Evolution, Levenberg-Marquardt).
 utils.plotting          : Plotly chart builders.
 utils.phases            : Phase library + phase-picker widget.
 utils.units             : Unit-conversion tables and helpers.
@@ -34,7 +35,9 @@ from utils.units import (
 )
 from utils.twophase import kr_curves, pc_curve
 from utils.twophase_solver import run_forward
-from utils.twophase_inverse import fit_corey, COREY_PARAM_NAMES
+from utils.twophase_inverse import (
+    fit_corey, COREY_PARAM_NAMES, OPTIMIZER_CHOICES,
+)
 from utils.plotting import (
     build_kr_chart, build_pc_chart,
     build_dp_time_chart, build_profile_animation,
@@ -523,7 +526,7 @@ with tab_fwd:
             height=480, scrolling=False,
         )
     elif ready_to_run:
-        st.caption("Click ‘Run Forward Simulation’ to generate ΔP "
+        st.caption("Click 'Run Forward Simulation' to generate ΔP "
                    "history and saturation profile.")
 
 # ── INVERSE TAB ─────────────────────────────────────────────────────────────
@@ -604,6 +607,28 @@ with tab_inv:
 
     st.markdown('<div class="section-label">▌ FIT OPTIONS</div>',
                 unsafe_allow_html=True)
+
+    # NEW: optimizer selector dropdown ──────────────────────────────────────
+    col_opt_label, col_opt_sel = st.columns([1.2, 2.8])
+    with col_opt_label:
+        st.markdown('<div class="row-label">Optimizer</div>',
+                    unsafe_allow_html=True)
+    with col_opt_sel:
+        optimizer_name = st.selectbox(
+            "Optimizer", OPTIMIZER_CHOICES,
+            index=0,       # Differential Evolution is first in the list
+            key="inv_optimizer",
+            label_visibility="collapsed",
+            help=(
+                "• Differential Evolution — global, robust to poor initial "
+                "guesses, ~500 forward calls.\n"
+                "• Nelder-Mead — local simplex with 8 automatic multi-starts "
+                "and log-space kr_max; fast when initial guess is decent.\n"
+                "• Levenberg-Marquardt — local gradient-based least-squares; "
+                "fastest when the initial guess is already close."
+            ),
+        )
+
     cF1, cF2, cF3, cF4 = st.columns(4)
     with cF1:
         fit_kim = st.checkbox("Fit kr_max,inj",  value=True, key="fit_kim")
@@ -616,10 +641,11 @@ with tab_inv:
     fit_mask = (fit_kim, fit_ni, fit_kdm, fit_nd)
 
     max_iter = st.number_input(
-        "Max optimizer iterations", min_value=10, max_value=500,
-        value=80, step=10, key="inv_maxiter",
-        help="Each iteration costs ~1 forward simulation. "
-             "Pc enabled = much slower.",
+        "Max optimizer iterations", min_value=10, max_value=2000,
+        value=200, step=10, key="inv_maxiter",
+        help="Rough budget for the optimizer. Nelder-Mead splits this "
+             "across 8 restarts; DE uses it to set max generations; LM "
+             "uses it as max function evaluations.",
     )
 
     if pc_enabled:
@@ -667,7 +693,9 @@ with tab_inv:
                 unsafe_allow_html=True,
             )
 
-        with st.spinner("Running Nelder–Mead optimization…"):
+        with st.spinner(
+            f"Running {optimizer_name} optimization…"
+        ):
             try:
                 st.session_state["tp_fit"] = fit_corey(
                     st.session_state["tp_inputs"],
@@ -675,6 +703,7 @@ with tab_inv:
                     fit_mask=fit_mask,
                     max_iter=int(max_iter),
                     on_iter=_progress,
+                    optimizer_name=optimizer_name,
                 )
                 st.session_state["tp_fit_hash"]    = cur_hash
                 st.session_state["tp_measured_t"]  = measured_t
@@ -706,6 +735,7 @@ with tab_inv:
 
         st.markdown(
             f'<div class="metric-card">'
+            f'<b>Optimizer:</b> <code>{fit.get("optimizer_name", "?")}</code> · '
             f'<b>Converged:</b> '
             f'<code>{"yes" if fit["converged"] else "no"}</code> '
             f'({fit["n_calls"]} forward calls) — '
@@ -714,7 +744,7 @@ with tab_inv:
             f'<b>n_inj</b>=<code>{fp["n_inj"]:.3f}</code>, '
             f'<b>kr_max,disp</b>=<code>{fp["kr_disp_max"]:.4f}</code>, '
             f'<b>n_disp</b>=<code>{fp["n_disp"]:.3f}</code><br>'
-            f'<b>Optimizer:</b> {fit["message"]}'
+            f'<b>Message:</b> {fit["message"]}'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -756,7 +786,7 @@ with tab_inv:
             key="inv_download",
         )
     elif can_fit:
-        st.caption("Click ‘Run Inverse Fit’ to fit Corey parameters "
+        st.caption("Click 'Run Inverse Fit' to fit Corey parameters "
                    "against the uploaded data.")
 
 # ── Clear cached results (full-page utility) ────────────────────────────────
