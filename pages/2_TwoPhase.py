@@ -15,10 +15,10 @@ utils.twophase_inverse  : Optimizer dispatcher (Nelder-Mead multi-start,
 utils.plotting          : Plotly chart builders.
 utils.phases            : Phase library + phase-picker widget.
 utils.units             : Unit-conversion tables and helpers.
+utils.ui                : Shared CSS + input-row helpers.
 """
 
 import hashlib
-import io
 import json
 import math
 
@@ -28,6 +28,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from utils.phases import phase_picker, io_buttons
+from utils.ui import inject_shared_css, render_header, input_row, dim_row
 from utils.units import (
     LENGTH_TO_CM, POROSITY_TO_FRACTION, PERMEABILITY_TO_MD,
     VOLUME_TO_ML, TIME_TO_MIN, PRESSURE_TO_BAR, DP_TO_MBAR,
@@ -53,104 +54,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Styling ─────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-[data-testid="stSidebarNav"]  {display: none;}
-[data-testid="stSidebar"]     {display: none;}
-#MainMenu                     {visibility: hidden;}
-header                        {visibility: hidden;}
-footer                        {visibility: hidden;}
-.stDeployButton               {display: none;}
-[data-testid="stToolbar"]     {visibility: hidden;}
-[data-testid="stDecoration"]  {display: none;}
-
-html, body, [class*="css"] { font-family: 'Courier New', monospace; }
-
-.section-label {
-    color: #6B7785; font-size: 12px;
-    letter-spacing: 0.12em; margin: 1rem 0 0.5rem 0;
-}
-.group-label {
-    color: #FB923C; font-size: 13px; margin: 0.75rem 0 0.25rem 0;
-}
-.row-label {
-    color: #9CA3AF; font-size: 13px; padding-top: 0.5rem;
-}
-.app-header {
-    display: flex; align-items: center; gap: 10px;
-    padding-bottom: 14px; border-bottom: 1px solid #1F2A33;
-    margin-bottom: 1rem;
-}
-.dot-teal  { color: #2DD4BF; }
-.app-title { color: #F0F4F8; font-size: 16px; }
-
-.debug-box {
-    background: #0F1A1F; border-left: 4px solid #2DD4BF;
-    padding: 18px 22px; margin: 0.6rem 0;
-    color: #C9D1D9 !important;
-    font-size: 13px !important; line-height: 1.7 !important;
-}
-.debug-box code { color: #2DD4BF !important; }
-.debug-box b    { color: #F0F4F8 !important; }
-.warn-box {
-    background: #2A1F0F; border-left: 3px solid #FB923C;
-    padding: 10px 14px; margin: 0.5rem 0;
-    color: #FB923C; font-size: 12px;
-}
-.error-box {
-    background: #2A0F0F; border-left: 3px solid #DC2626;
-    padding: 10px 14px; margin: 0.5rem 0;
-    color: #FCA5A5; font-size: 12px;
-}
-.metric-card {
-    background: #0F1A1F; border-left: 4px solid #2DD4BF;
-    padding: 14px 18px; margin: 0.4rem 0;
-    color: #C9D1D9; font-size: 13px;
-}
-.metric-card b    { color: #F0F4F8; }
-.metric-card code { color: #2DD4BF; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── Input helpers ───────────────────────────────────────────────────────────
-def _input_row(label, default, units, key_prefix, fmt="%g",
-               default_unit=None, help=None):
-    c1, c2, c3 = st.columns([1.2, 1.5, 1])
-    with c1:
-        st.markdown(f'<div class="row-label">{label}</div>',
-                    unsafe_allow_html=True)
-    with c2:
-        v = st.number_input(
-            label, value=float(default), key=f"{key_prefix}_val",
-            label_visibility="collapsed", format=fmt, help=help,
-        )
-    with c3:
-        ulist = list(units.keys())
-        idx = ulist.index(default_unit) if default_unit in ulist else 0
-        u = st.selectbox(
-            label, ulist, index=idx, key=f"{key_prefix}_unit",
-            label_visibility="collapsed",
-        )
-    return v, u
-
-
-def _dim_row(label, default, key_prefix, fmt="%g",
-             min_value=None, max_value=None, step=None, help=None):
-    c1, c2 = st.columns([1.2, 2.5])
-    with c1:
-        st.markdown(f'<div class="row-label">{label}</div>',
-                    unsafe_allow_html=True)
-    with c2:
-        kwargs = dict(
-            value=float(default), key=f"{key_prefix}_val",
-            label_visibility="collapsed", format=fmt, help=help,
-        )
-        if min_value is not None: kwargs["min_value"] = float(min_value)
-        if max_value is not None: kwargs["max_value"] = float(max_value)
-        if step is not None:      kwargs["step"] = float(step)
-        return st.number_input(label, **kwargs)
+inject_shared_css()
+render_header("CoreFlood Lab — Two-Phase (Relative Permeability)")
 
 
 def _inputs_hash(d: dict) -> str:
@@ -159,14 +64,6 @@ def _inputs_hash(d: dict) -> str:
         json.dumps(d, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:10]
 
-
-# ── Header ──────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="app-header">
-  <span class="dot-teal">●</span>
-  <span class="app-title">CoreFlood Lab — Two-Phase (Relative Permeability)</span>
-</div>
-""", unsafe_allow_html=True)
 
 # ── Phase library expander ──────────────────────────────────────────────────
 with st.expander("Phase library (download / upload custom phases)",
@@ -201,7 +98,7 @@ col_si, col_sd = st.columns(2)
 with col_si:
     st.markdown('<div class="group-label">Injected phase</div>',
                 unsafe_allow_html=True)
-    s_inj_r_val, s_inj_r_u = _input_row(
+    s_inj_r_val, s_inj_r_u = input_row(
         "S_r (residual)", 0.0, POROSITY_TO_FRACTION,
         "s_inj_r", default_unit="fraction",
         help="Residual saturation of the injected phase; kr_inj = 0 "
@@ -210,7 +107,7 @@ with col_si:
 with col_sd:
     st.markdown('<div class="group-label">Displaced phase</div>',
                 unsafe_allow_html=True)
-    s_disp_r_val, s_disp_r_u = _input_row(
+    s_disp_r_val, s_disp_r_u = input_row(
         "S_r (residual)", 0.20, POROSITY_TO_FRACTION,
         "s_disp_r", default_unit="fraction",
         help="Residual saturation of the displaced phase that cannot "
@@ -228,12 +125,12 @@ col_ki, col_kd = st.columns(2)
 with col_ki:
     st.markdown('<div class="group-label">Injected phase</div>',
                 unsafe_allow_html=True)
-    kr_inj_max = _dim_row(
+    kr_inj_max = dim_row(
         "End-point kr_max", 0.6, "kr_inj_max",
         min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f",
         help="kr of injected phase at S_inj = 1 − S_r,disp (max sweep).",
     )
-    n_inj = _dim_row(
+    n_inj = dim_row(
         "Corey exponent n", 2.0, "n_inj",
         min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f",
         help="Curvature of kr curve: n=1 linear, n=2 quadratic, "
@@ -242,12 +139,12 @@ with col_ki:
 with col_kd:
     st.markdown('<div class="group-label">Displaced phase</div>',
                 unsafe_allow_html=True)
-    kr_disp_max = _dim_row(
+    kr_disp_max = dim_row(
         "End-point kr_max", 1.0, "kr_disp_max",
         min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f",
         help="kr of displaced phase at S_inj = S_r,inj (no sweep).",
     )
-    n_disp = _dim_row(
+    n_disp = dim_row(
         "Corey exponent n", 3.0, "n_disp",
         min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f",
         help="Curvature of kr curve: n=1 linear, n=2 quadratic, "
@@ -269,7 +166,7 @@ pc_lambda     = None
 if pc_enabled:
     col_pe, col_pl = st.columns(2)
     with col_pe:
-        pc_entry_val, pc_entry_u = _input_row(
+        pc_entry_val, pc_entry_u = input_row(
             "Entry pressure P_e", 100.0, DP_TO_MBAR,
             "pc_entry", default_unit="mbar",
             help="Brooks–Corey threshold entry pressure of the "
@@ -277,7 +174,7 @@ if pc_enabled:
         )
         pc_entry_mbar = convert(pc_entry_val, pc_entry_u, DP_TO_MBAR)
     with col_pl:
-        pc_lambda = _dim_row(
+        pc_lambda = dim_row(
             "Pore-size index λ", 2.0, "pc_lambda",
             min_value=0.1, max_value=10.0, step=0.1, fmt="%.2f",
             help="Brooks–Corey pore-size distribution index. "
@@ -287,14 +184,14 @@ if pc_enabled:
 # ── Rock & core geometry ────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ ROCK & CORE GEOMETRY</div>',
             unsafe_allow_html=True)
-L_val, L_u     = _input_row("Length L",         10.0,  LENGTH_TO_CM,
-                            "core_L", default_unit="cm")
-D_val, D_u     = _input_row("Diameter D",       3.8,   LENGTH_TO_CM,
-                            "core_D", default_unit="cm")
-phi_val, phi_u = _input_row("Porosity φ",       20.0,  POROSITY_TO_FRACTION,
-                            "core_phi", default_unit="%")
-k_val, k_u     = _input_row("Absolute perm. k", 100.0, PERMEABILITY_TO_MD,
-                            "core_k", default_unit="mD")
+L_val, L_u     = input_row("Length L",         10.0,  LENGTH_TO_CM,
+                           "core_L", default_unit="cm")
+D_val, D_u     = input_row("Diameter D",       3.8,   LENGTH_TO_CM,
+                           "core_D", default_unit="cm")
+phi_val, phi_u = input_row("Porosity φ",       20.0,  POROSITY_TO_FRACTION,
+                           "core_phi", default_unit="%")
+k_val, k_u     = input_row("Absolute perm. k", 100.0, PERMEABILITY_TO_MD,
+                           "core_k", default_unit="mD")
 L_cm  = convert(L_val,   L_u,   LENGTH_TO_CM)
 D_cm  = convert(D_val,   D_u,   LENGTH_TO_CM)
 phi   = convert(phi_val, phi_u, POROSITY_TO_FRACTION)
@@ -318,11 +215,11 @@ with c4:
     q_time_u = st.selectbox("time", list(TIME_TO_MIN.keys()), index=1,
                             key="q_time_u", label_visibility="collapsed")
 q_ml_min = convert_injection_rate(q_val, q_vol_u, q_time_u)
-p_back_val, p_back_u   = _input_row("Back pressure P_out", 1.0,
-                                    PRESSURE_TO_BAR, "op_pback",
-                                    default_unit="bar")
-t_total_val, t_total_u = _input_row("Total time", 60.0, TIME_TO_MIN,
-                                    "op_ttotal", default_unit="min")
+p_back_val, p_back_u   = input_row("Back pressure P_out", 1.0,
+                                   PRESSURE_TO_BAR, "op_pback",
+                                   default_unit="bar")
+t_total_val, t_total_u = input_row("Total time", 60.0, TIME_TO_MIN,
+                                   "op_ttotal", default_unit="min")
 p_back_bar  = convert(p_back_val,  p_back_u,  PRESSURE_TO_BAR)
 t_total_min = convert(t_total_val, t_total_u, TIME_TO_MIN)
 
@@ -501,7 +398,6 @@ with tab_fwd:
             f'</div>',
             unsafe_allow_html=True,
         )
-        # ── CSV export: ΔP(t) history from this forward run ────────────────
         export_df = pd.DataFrame({
             "time_min": results["t_min"],
             "dP_mbar":  results["dP_mbar"],
@@ -513,7 +409,7 @@ with tab_fwd:
             mime="text/csv",
             key="fwd_download_dp",
             help="Export this forward run's ΔP(t) as a CSV. Load it on the "
-                "Inverse tab to demonstrate the back-fitting workflow.",
+                 "Inverse tab to demonstrate the back-fitting workflow.",
             disabled=is_stale,
         )
         components.html(
@@ -608,7 +504,6 @@ with tab_inv:
     st.markdown('<div class="section-label">▌ FIT OPTIONS</div>',
                 unsafe_allow_html=True)
 
-    # NEW: optimizer selector dropdown ──────────────────────────────────────
     col_opt_label, col_opt_sel = st.columns([1.2, 2.8])
     with col_opt_label:
         st.markdown('<div class="row-label">Optimizer</div>',
@@ -616,7 +511,7 @@ with tab_inv:
     with col_opt_sel:
         optimizer_name = st.selectbox(
             "Optimizer", OPTIMIZER_CHOICES,
-            index=0,       # Differential Evolution is first in the list
+            index=0,
             key="inv_optimizer",
             label_visibility="collapsed",
             help=(
@@ -693,9 +588,7 @@ with tab_inv:
                 unsafe_allow_html=True,
             )
 
-        with st.spinner(
-            f"Running {optimizer_name} optimization…"
-        ):
+        with st.spinner(f"Running {optimizer_name} optimization…"):
             try:
                 st.session_state["tp_fit"] = fit_corey(
                     st.session_state["tp_inputs"],
