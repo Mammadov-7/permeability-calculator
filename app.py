@@ -1,5 +1,12 @@
 """
 CoreFlood Lab — Permeability Matching Tool (single-phase).
+
+Now with EOS-aware compressibility:
+    - Incompressible fluids (liquids): user-supplied c, used verbatim.
+    - Ideal-gas fluids:  c = 1/P computed per cell per timestep from
+      the local pressure. Field shown grayed out; override checkbox
+      allows entering a manual value (e.g. lab-measured c) when the
+      built-in EOS is not appropriate.
 """
 
 import streamlit as st
@@ -8,14 +15,17 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 from calculators.absolute_perm import match_permeability
+from utils.eos import make_eos
+from utils.phases import phase_picker, io_buttons
 from utils.ui import (
     inject_shared_css, render_header, input_row, injection_rate_row,
 )
 from utils.units import (
     LENGTH_TO_CM, AREA_TO_CM2, POROSITY_TO_FRACTION,
-    VISCOSITY_TO_CP, COMPRESSIBILITY_TO_INV_PA,
+    COMPRESSIBILITY_TO_INV_PA,
     VOLUME_TO_ML, TIME_TO_MIN, PRESSURE_TO_BAR, DP_TO_MBAR,
-    convert, convert_injection_rate,
+    TEMPERATURE_UNITS,
+    convert, convert_injection_rate, convert_temperature,
 )
 
 # ── Page config ─────────────────────────────────────────────────────────────
@@ -32,7 +42,7 @@ render_header("CoreFlood Lab — Permeability Matching Tool")
 tab_abs, tab_about = st.tabs(["Absolute Permeability", "About Model"])
 
 
-# ── Plotly chart builders (single-page, kept here for now) ──────────────────
+# ── Plotly chart builders ───────────────────────────────────────────────────
 AXIS_TITLE_FONT = dict(color="#0B1014", family="Courier New", size=15)
 AXIS_TICK_FONT  = dict(color="#0B1014", family="Courier New", size=13)
 
@@ -44,24 +54,18 @@ def _apply_layout(fig, t_max, y_max, title):
         xaxis=dict(
             title=dict(text="<b>Time [min]</b>", font=AXIS_TITLE_FONT),
             tickfont=AXIS_TICK_FONT,
-            gridcolor="#D1D5DB",
-            zerolinecolor="#0B1014",
-            linecolor="#0B1014",
-            range=[0, t_max],
+            gridcolor="#D1D5DB", zerolinecolor="#0B1014",
+            linecolor="#0B1014", range=[0, t_max],
         ),
         yaxis=dict(
             title=dict(text="<b>ΔP [mbar]</b>", font=AXIS_TITLE_FONT),
             tickfont=AXIS_TICK_FONT,
-            gridcolor="#D1D5DB",
-            zerolinecolor="#0B1014",
-            linecolor="#0B1014",
-            range=[0, y_max],
+            gridcolor="#D1D5DB", zerolinecolor="#0B1014",
+            linecolor="#0B1014", range=[0, y_max],
         ),
-        plot_bgcolor="#FFFFFF",
-        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
         font=dict(family="Courier New"),
-        height=420,
-        margin=dict(l=80, r=40, t=50, b=70),
+        height=420, margin=dict(l=80, r=40, t=50, b=70),
         showlegend=False,
     )
 
@@ -84,7 +88,6 @@ def build_animated_chart(t_arr, dp_arr, t_max, target_dp, k_value):
     n_total  = len(t_arr)
     n_frames = 60
     step     = max(1, n_total // n_frames)
-
     frame_indices = list(range(2, n_total, step))
     if not frame_indices or frame_indices[-1] != n_total:
         frame_indices.append(n_total)
@@ -92,8 +95,7 @@ def build_animated_chart(t_arr, dp_arr, t_max, target_dp, k_value):
     frames = [
         go.Frame(
             data=[go.Scatter(
-                x=list(t_arr[:i]),
-                y=list(dp_arr[:i]),
+                x=list(t_arr[:i]), y=list(dp_arr[:i]),
                 mode="lines",
                 line=dict(color="#16A34A", width=2.8),
             )],
@@ -104,10 +106,8 @@ def build_animated_chart(t_arr, dp_arr, t_max, target_dp, k_value):
 
     fig = go.Figure(
         data=[go.Scatter(
-            x=[t_arr[0]], y=[dp_arr[0]],
-            mode="lines",
-            line=dict(color="#16A34A", width=2.8),
-            name="simulated",
+            x=[t_arr[0]], y=[dp_arr[0]], mode="lines",
+            line=dict(color="#16A34A", width=2.8), name="simulated",
             hovertemplate="t = %{x:.2f} min<br>ΔP = %{y:.2f} mbar"
                           "<extra></extra>",
         )],
@@ -129,11 +129,8 @@ def build_animated_chart(t_arr, dp_arr, t_max, target_dp, k_value):
 
 
 def render_chart_html(fig, autoplay=False):
-    """Convert a Plotly figure to standalone HTML; optionally autoplay frames."""
     html_str = pio.to_html(
-        fig,
-        include_plotlyjs="cdn",
-        full_html=False,
+        fig, include_plotlyjs="cdn", full_html=False,
         config={"displayModeBar": False, "responsive": True},
     )
     if autoplay:
@@ -175,16 +172,79 @@ with tab_abs:
         A_val,   A_unit   = input_row("Area",     11.4, AREA_TO_CM2,         "A")
         phi_val, phi_unit = input_row("Porosity", 0.20, POROSITY_TO_FRACTION,"phi")
 
-        st.markdown('<div class="group-label">Fluid Properties</div>',
+        st.markdown('<div class="group-label">Phase</div>',
                     unsafe_allow_html=True)
-        mu_val, mu_unit = input_row("Viscosity", 1.0,     VISCOSITY_TO_CP,
-                                    "mu")
-        c_val,  c_unit  = input_row("Compressibility", 4.5e-10,
-                                    COMPRESSIBILITY_TO_INV_PA, "c",
-                                    fmt="%.2e")
+        phase = phase_picker("op_phase", default="Water (fresh)")
 
-        st.markdown('<div class="group-label">Boundary Conditions</div>',
+        st.markdown('<div class="group-label">Compressibility</div>',
                     unsafe_allow_html=True)
+
+        # Show what EOS is in use and let the user override if they want.
+        eos_is_computed = phase["eos_model"] != "incompressible"
+        eos_label = {
+            "incompressible": "Incompressible — constant c below.",
+            "ideal_gas":      "Ideal gas — c = 1/P computed per cell.",
+        }.get(phase["eos_model"], phase["eos_model"])
+
+        st.caption(f"EOS model: **{eos_label}**")
+
+        override = False
+        if eos_is_computed:
+            override = st.checkbox(
+                "Override with manual value",
+                value=False, key="c_override",
+                help="Uncheck to let the EOS compute c automatically "
+                     "from local cell pressure. Check to supply a "
+                     "single measured value (e.g. from lab experiment).",
+            )
+
+        # Default numeric value for the c field:
+        #   - Liquids: use the phase's stored c (falls back to 4.5e-10)
+        #   - Gases: use 1/P_out as a placeholder shown to the user
+        default_c = phase.get("compressibility_1_per_Pa") or 4.5e-10
+
+        # Field is editable when either (a) EOS is incompressible, or
+        # (b) EOS is computed but user turned on override.
+        field_editable = (not eos_is_computed) or override
+
+        if field_editable:
+            c_val, c_unit = input_row(
+                "c", default_c, COMPRESSIBILITY_TO_INV_PA, "c",
+                fmt="%.2e",
+            )
+            c_manual_Pa = convert(c_val, c_unit,
+                                  COMPRESSIBILITY_TO_INV_PA)
+        else:
+            # Read-only display of the EOS-computed value.
+            # Show it evaluated at the back-pressure so the user has a
+            # sense of magnitude before running.
+            st.text_input(
+                "c [1/Pa] (computed from EOS at back-pressure)",
+                value=f"{1.0 / 1e5:.3e}   ← updated after solve",
+                key="c_readonly", disabled=True,
+            )
+            c_manual_Pa = None      # ignored by IdealGasEOS
+
+        st.markdown('<div class="group-label">Operating Conditions</div>',
+                    unsafe_allow_html=True)
+
+        # Temperature input (required for gas EOS; harmless for liquids).
+        c1, c2, c3 = st.columns([1.2, 1.5, 1])
+        with c1:
+            st.markdown('<div class="row-label">Temperature</div>',
+                        unsafe_allow_html=True)
+        with c2:
+            T_val = st.number_input(
+                "T", value=20.0, key="T_val",
+                label_visibility="collapsed", format="%g",
+            )
+        with c3:
+            T_unit = st.selectbox(
+                "T unit", TEMPERATURE_UNITS,
+                index=TEMPERATURE_UNITS.index("°C"),
+                key="T_unit", label_visibility="collapsed",
+            )
+
         q_val, q_vol_unit, q_time_unit = injection_rate_row(
             "Injection rate", 1.0, VOLUME_TO_ML, TIME_TO_MIN, "q",
         )
@@ -205,38 +265,45 @@ with tab_abs:
         try:
             L_cm           = convert(L_val,   L_unit,   LENGTH_TO_CM)
             A_cm2          = convert(A_val,   A_unit,   AREA_TO_CM2)
-            phi            = convert(phi_val, phi_unit, POROSITY_TO_FRACTION)
-            mu_cP          = convert(mu_val,  mu_unit,  VISCOSITY_TO_CP)
-            c_Pa           = convert(c_val,   c_unit,   COMPRESSIBILITY_TO_INV_PA)
+            phi_frac       = convert(phi_val, phi_unit, POROSITY_TO_FRACTION)
+            mu_cP          = phase["viscosity_cP"]
             q_ml_min       = convert_injection_rate(q_val, q_vol_unit,
                                                     q_time_unit)
             P_out_bar      = convert(p_val,   p_unit,   PRESSURE_TO_BAR)
             target_dp_mbar = convert(dp_val,  dp_unit,  DP_TO_MBAR)
             total_time_min = convert(t_val,   t_unit,   TIME_TO_MIN)
+            T_K            = convert_temperature(T_val, T_unit)
         except ValueError as e:
             st.error(f"Unit error: {e}")
             st.stop()
 
+        # Build the EOS. Override wins if enabled.
+        if field_editable and c_manual_Pa is not None:
+            # User supplied a specific c → treat as incompressible for solve.
+            eos = make_eos("incompressible", c_user_Pa=c_manual_Pa)
+        else:
+            eos = make_eos(phase["eos_model"],
+                           c_user_Pa=phase.get("compressibility_1_per_Pa"))
+
         with st.spinner("Running Nelder-Mead optimisation…"):
             k, t_arr, dp_arr, n_iter = match_permeability(
-                L_cm=L_cm, A_cm2=A_cm2, phi=phi,
-                mu_cP=mu_cP, c_Pa=c_Pa, q_ml_min=q_ml_min,
-                P_out_bar=P_out_bar,
+                L_cm=L_cm, A_cm2=A_cm2, phi=phi_frac,
+                mu_cP=mu_cP, eos=eos, T_K=T_K,
+                q_ml_min=q_ml_min, P_out_bar=P_out_bar,
                 total_time_mins=total_time_min, dt_mins=1.0,
                 target_dp_mbar=target_dp_mbar,
             )
 
         final_dp  = dp_arr[-1]
         error_pct = abs(final_dp - target_dp_mbar) / target_dp_mbar * 100.0
+        # Report the c that the EOS *actually used* at the final pressure.
+        P_final_Pa = (final_dp + P_out_bar * 1000.0) * 100.0   # mbar → Pa
+        c_used = eos.get_compressibility(P_final_Pa, T_K)
         result = {
-            "k":         k,
-            "t_arr":     t_arr,
-            "dp_arr":    dp_arr,
-            "n_iter":    n_iter,
-            "final_dp":  final_dp,
-            "error_pct": error_pct,
-            "target_dp": target_dp_mbar,
-            "total_time": total_time_min,
+            "k": k, "t_arr": t_arr, "dp_arr": dp_arr,
+            "n_iter": n_iter, "final_dp": final_dp, "error_pct": error_pct,
+            "target_dp": target_dp_mbar, "total_time": total_time_min,
+            "c_used": c_used, "eos_name": eos.name, "phase": phase["name"],
         }
 
     # ── Right column: results ───────────────────────────────────────────────
@@ -252,6 +319,9 @@ with tab_abs:
                   <div class="result-k">k = {result['k']:.2f} mD</div>
                 </div>
                 <div style="font-size: 13px; line-height: 1.9;">
+                  <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Phase</span><span>{result['phase']}</span></div>
+                  <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">EOS</span><span>{result['eos_name']}</span></div>
+                  <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">c used</span><span>{result['c_used']:.3e} /Pa</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Target ΔP</span><span>{result['target_dp']:.2f} mbar</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Final ΔP</span><span>{result['final_dp']:.2f} mbar</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Error</span><span style="color:#2DD4BF;">{result['error_pct']:.2f} %</span></div>
@@ -301,8 +371,8 @@ with tab_about:
         """
         ### About the Model
 
-        This tool performs **automated history matching** for single-phase, slightly
-        compressible flow through a 1D porous core sample.
+        Automated history matching for single-phase, compressible flow
+        through a 1D porous core sample.
 
         **Governing equation — Darcy's Law:**
 
@@ -312,14 +382,21 @@ with tab_about:
         - 1D finite-difference discretisation (20 cells)
         - Implicit time stepping (backward Euler)
         - Sparse linear solver per time step (`scipy.sparse.linalg.spsolve`)
+        - Compressibility from pluggable EOS, evaluated at cell mean
+          pressure of the previous timestep (lag-of-one linearisation)
+
+        **EOS options:**
+        - *Incompressible* — constant c supplied by the user (typical for
+          liquids at core-flood conditions).
+        - *Ideal gas* — c = 1/P computed automatically from the local
+          cell pressure at each timestep.
 
         **History matching:**
-        Given a target ΔP measured in the lab, the **Nelder-Mead** optimiser searches
-        for the permeability *k* that produces a steady-state ΔP matching the target
-        within a 1e-4 mbar tolerance.
+        Given a target ΔP measured in the lab, the **Nelder-Mead**
+        optimiser searches for the permeability *k* that minimises the
+        **squared error** between simulated and target steady-state ΔP.
 
-        **Units:**
-        All inputs are converted internally to the solver's expected units
-        (cm, cm², cP, 1/Pa, ml/min, bar, mbar, min).
+        **Units:** all inputs are converted internally to the solver's
+        expected units (cm, cm², cP, 1/Pa, ml/min, bar, mbar, min, K).
         """
     )

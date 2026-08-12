@@ -1,10 +1,13 @@
 """
-Phase library and phase-picker UI for the two-phase calculator.
+Phase library and phase-picker UI for CoreFlood Lab.
 
 - Built-in phases loaded from data/phases.json
 - Custom phases stored in st.session_state (persist for the session)
 - Optional JSON download/upload to persist across sessions
 - phase_picker() — reusable widget for picking one phase
+
+Each returned phase dict includes: name, type, density_kg_m3, viscosity_cP,
+eos_model, compressibility_1_per_Pa (may be None for gases).
 """
 
 import json
@@ -13,6 +16,7 @@ from pathlib import Path
 import streamlit as st
 
 from utils.units import DENSITY_TO_KGM3, VISCOSITY_TO_CP, convert
+from utils.ui import input_row
 
 
 # ── Data access ─────────────────────────────────────────────────────────────
@@ -34,41 +38,28 @@ def get_all_phases():
     return phases
 
 
-def add_custom_phase(name, type_, density_kg_m3, viscosity_cP):
+def add_custom_phase(name, type_, density_kg_m3, viscosity_cP,
+                     eos_model="incompressible",
+                     compressibility_1_per_Pa=None):
     _session_customs()[name] = {
         "type": type_,
         "density_kg_m3": float(density_kg_m3),
         "viscosity_cP": float(viscosity_cP),
+        "eos_model": eos_model,
+        "compressibility_1_per_Pa": (
+            float(compressibility_1_per_Pa)
+            if compressibility_1_per_Pa is not None else None
+        ),
         "_custom": True,
     }
-
-
-# ── Internal UI helper (mirrors app.py input_row) ───────────────────────────
-def _input_row(label, default, units, key_prefix, fmt="%g", default_unit=None):
-    c1, c2, c3 = st.columns([1.2, 1.5, 1])
-    with c1:
-        st.markdown(f'<div class="row-label">{label}</div>',
-                    unsafe_allow_html=True)
-    with c2:
-        v = st.number_input(
-            label, value=float(default), key=f"{key_prefix}_val",
-            label_visibility="collapsed", format=fmt,
-        )
-    with c3:
-        ulist = list(units.keys())
-        idx = ulist.index(default_unit) if default_unit in ulist else 0
-        u = st.selectbox(
-            label, ulist, index=idx, key=f"{key_prefix}_unit",
-            label_visibility="collapsed",
-        )
-    return v, u
 
 
 # ── Main reusable widget ────────────────────────────────────────────────────
 def phase_picker(key_prefix, default=None):
     """
     Render dropdown + editable density/viscosity for one phase.
-    Returns dict: name, type, density_kg_m3, viscosity_cP.
+    Returns dict: name, type, density_kg_m3, viscosity_cP, eos_model,
+    compressibility_1_per_Pa (may be None for gases with no user override).
     """
     all_phases = get_all_phases()
     options = list(all_phases.keys()) + ["+ Other..."]
@@ -83,11 +74,11 @@ def phase_picker(key_prefix, default=None):
         return _custom_phase_form(key_prefix)
 
     base = all_phases[choice]
-    rho, rho_u = _input_row(
+    rho, rho_u = input_row(
         "Density", base["density_kg_m3"], DENSITY_TO_KGM3,
         f"{key_prefix}_rho", default_unit="kg/m³",
     )
-    mu, mu_u = _input_row(
+    mu, mu_u = input_row(
         "Viscosity", base["viscosity_cP"], VISCOSITY_TO_CP,
         f"{key_prefix}_mu", default_unit="cP",
     )
@@ -97,6 +88,10 @@ def phase_picker(key_prefix, default=None):
         "type": base["type"],
         "density_kg_m3": convert(rho, rho_u, DENSITY_TO_KGM3),
         "viscosity_cP":  convert(mu,  mu_u,  VISCOSITY_TO_CP),
+        "eos_model":     base.get("eos_model", "incompressible"),
+        "compressibility_1_per_Pa": base.get(
+            "compressibility_1_per_Pa", None
+        ),
     }
 
 
@@ -109,29 +104,51 @@ def _custom_phase_form(key_prefix):
         "Type", ["gas", "liquid"], horizontal=True,
         key=f"{key_prefix}_custom_type",
     )
-    rho, rho_u = _input_row(
+    rho, rho_u = input_row(
         "Density", 1.0, DENSITY_TO_KGM3,
         f"{key_prefix}_custom_rho", default_unit="kg/m³",
     )
-    mu, mu_u = _input_row(
+    mu, mu_u = input_row(
         "Viscosity", 0.01, VISCOSITY_TO_CP,
         f"{key_prefix}_custom_mu", default_unit="cP",
     )
     rho_kgm3 = convert(rho, rho_u, DENSITY_TO_KGM3)
     mu_cP    = convert(mu,  mu_u,  VISCOSITY_TO_CP)
 
+    # Default EOS choice based on type; can override for exotic cases.
+    eos_default = "ideal_gas" if type_ == "gas" else "incompressible"
+    eos_model = st.selectbox(
+        "EOS model", ["incompressible", "ideal_gas"],
+        index=["incompressible", "ideal_gas"].index(eos_default),
+        key=f"{key_prefix}_custom_eos",
+        help="Incompressible = constant compressibility you supply. "
+             "Ideal gas = c computed from local pressure (c = 1/P).",
+    )
+
+    # Compressibility field only needed for incompressible EOS.
+    c_val = None
+    if eos_model == "incompressible":
+        c_val = st.number_input(
+            "Compressibility [1/Pa]", value=4.5e-10, format="%.2e",
+            key=f"{key_prefix}_custom_c",
+        )
+
     save = st.checkbox(
         "Save this phase for this session",
         key=f"{key_prefix}_save",
     )
     if save and name.strip():
-        add_custom_phase(name.strip(), type_, rho_kgm3, mu_cP)
+        add_custom_phase(name.strip(), type_, rho_kgm3, mu_cP,
+                         eos_model=eos_model,
+                         compressibility_1_per_Pa=c_val)
 
     return {
         "name": name.strip() or "Custom",
         "type": type_,
         "density_kg_m3": rho_kgm3,
         "viscosity_cP": mu_cP,
+        "eos_model": eos_model,
+        "compressibility_1_per_Pa": c_val,
     }
 
 
@@ -160,6 +177,9 @@ def io_buttons():
                     add_custom_phase(
                         nm, d.get("type", "liquid"),
                         d["density_kg_m3"], d["viscosity_cP"],
+                        eos_model=d.get("eos_model", "incompressible"),
+                        compressibility_1_per_Pa=d.get(
+                            "compressibility_1_per_Pa"),
                     )
                 st.success(f"Loaded {len(loaded)} custom phase(s).")
             except Exception as e:

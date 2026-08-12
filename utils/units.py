@@ -1,8 +1,11 @@
 """
-Unit-conversion helpers for the permeability calculator.
+Unit-conversion helpers for CoreFlood Lab.
 
 Each table maps a unit string to the multiplier that converts a value
 expressed in that unit into the base unit used by the solvers.
+
+Temperature is a special case — °C, K, and °F are related by affine
+transformations, so use `convert_temperature()` instead of `convert()`.
 
 Base units:
     Length          -> cm
@@ -16,6 +19,7 @@ Base units:
     Pressure        -> bar
     Pressure drop   -> mbar
     Permeability    -> mD
+    Temperature     -> K   (via convert_temperature)
 """
 
 # ── Length → cm ──────────────────────────────────────────────────────────────
@@ -107,6 +111,9 @@ PERMEABILITY_TO_MD = {
     "m²": 1.01325e15,
 }
 
+# ── Temperature (affine — do NOT use with convert()) ─────────────────────────
+TEMPERATURE_UNITS = ["°C", "K", "°F"]
+
 
 def convert(value: float, unit: str, table: dict) -> float:
     """Convert `value` from `unit` to the base unit defined by `table`."""
@@ -123,3 +130,21 @@ def convert_injection_rate(value: float, volume_unit: str,
     volume_in_ml = convert(value, volume_unit, VOLUME_TO_ML)
     time_in_min  = convert(1.0, time_unit, TIME_TO_MIN)
     return volume_in_ml / time_in_min
+
+
+def convert_temperature(value: float, unit: str) -> float:
+    """
+    Convert a temperature to Kelvin. Uses the affine formulas:
+        K   = °C + 273.15
+        K   = (°F − 32) × 5/9 + 273.15
+        K   = K
+    """
+    if unit == "K":
+        return float(value)
+    if unit == "°C":
+        return float(value) + 273.15
+    if unit == "°F":
+        return (float(value) - 32.0) * (5.0 / 9.0) + 273.15
+    raise ValueError(
+        f"Unknown temperature unit '{unit}'. Allowed: {TEMPERATURE_UNITS}"
+    )
