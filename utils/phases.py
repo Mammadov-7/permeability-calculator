@@ -58,6 +58,12 @@ def add_custom_phase(name, type_, density_kg_m3, viscosity_cP,
 def phase_picker(key_prefix, default=None):
     """
     Render dropdown + editable density/viscosity for one phase.
+
+    The density and viscosity widgets are keyed by (key_prefix, phase-name)
+    so that switching phases forces Streamlit to instantiate FRESH widgets
+    pre-filled with the newly-selected phase's defaults, instead of
+    silently reusing the previous phase's numbers.
+
     Returns dict: name, type, density_kg_m3, viscosity_cP, eos_model,
     compressibility_1_per_Pa (may be None for gases with no user override).
     """
@@ -74,13 +80,19 @@ def phase_picker(key_prefix, default=None):
         return _custom_phase_form(key_prefix)
 
     base = all_phases[choice]
+
+    # Sanitise phase-name for use as part of a Streamlit widget key
+    # (spaces, parentheses, punctuation are all fine for Streamlit keys
+    # but replacing them keeps the keys legible in error messages).
+    safe = "".join(ch if ch.isalnum() else "_" for ch in choice)
+
     rho, rho_u = input_row(
         "Density", base["density_kg_m3"], DENSITY_TO_KGM3,
-        f"{key_prefix}_rho", default_unit="kg/m³",
+        f"{key_prefix}_rho_{safe}", default_unit="kg/m³",
     )
     mu, mu_u = input_row(
         "Viscosity", base["viscosity_cP"], VISCOSITY_TO_CP,
-        f"{key_prefix}_mu", default_unit="cP",
+        f"{key_prefix}_mu_{safe}", default_unit="cP",
     )
 
     return {
