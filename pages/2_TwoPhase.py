@@ -8,16 +8,17 @@ appear in the Forward and Inverse tabs below.
 
 Module map
 ----------
-utils.twophase          : Corey kr and Brooks-Corey Pc functions.
+utils.kr_models         : Pluggable kr parameterizations (Corey, LET).
+utils.twophase          : kr / Pc factories using the selected model.
 utils.twophase_solver   : 1D IMPES forward simulator.
-utils.twophase_inverse  : Optimizer dispatcher (Nelder-Mead multi-start,
-                          Differential Evolution, Levenberg-Marquardt).
+utils.twophase_inverse  : Model-agnostic optimizer dispatcher.
 utils.plotting          : Plotly chart builders.
 utils.phases            : Phase library + phase-picker widget.
 utils.units             : Unit-conversion tables and helpers.
 utils.ui                : Shared CSS + input-row helpers.
 """
 
+import copy
 import hashlib
 import json
 import math
@@ -34,11 +35,10 @@ from utils.units import (
     VOLUME_TO_ML, TIME_TO_MIN, PRESSURE_TO_BAR, DP_TO_MBAR,
     convert, convert_injection_rate,
 )
+from utils.kr_models import KR_MODEL_CHOICES, get_model_class
 from utils.twophase import kr_curves, pc_curve
 from utils.twophase_solver import run_forward
-from utils.twophase_inverse import (
-    fit_corey, COREY_PARAM_NAMES, OPTIMIZER_CHOICES,
-)
+from utils.twophase_inverse import fit_kr, OPTIMIZER_CHOICES
 from utils.plotting import (
     build_kr_chart, build_pc_chart,
     build_dp_time_chart, build_profile_animation,
@@ -117,39 +117,63 @@ s_inj_r  = convert(s_inj_r_val,  s_inj_r_u,  POROSITY_TO_FRACTION)
 s_disp_r = convert(s_disp_r_val, s_disp_r_u, POROSITY_TO_FRACTION)
 mobile_range = 1.0 - s_inj_r - s_disp_r
 
-# ── Corey kr parameters ─────────────────────────────────────────────────────
-st.markdown('<div class="section-label">▌ COREY kr PARAMETERS '
+# ── Relative permeability model + parameters (initial guesses) ──────────────
+st.markdown('<div class="section-label">▌ RELATIVE PERMEABILITY MODEL '
             '(initial guesses for Inverse)</div>',
             unsafe_allow_html=True)
+
+# Model dropdown as first row.
+col_m_lbl, col_m_sel = st.columns([1.2, 2.8])
+with col_m_lbl:
+    st.markdown('<div class="row-label">Model</div>',
+                unsafe_allow_html=True)
+with col_m_sel:
+    selected_model_name = st.selectbox(
+        "Model", KR_MODEL_CHOICES, index=0,
+        key="kr_model", label_visibility="collapsed",
+        help=(
+            "• Corey — 4 parameters (kr_max and n per phase). Industry "
+            "default, physically legible, well-constrained by transient "
+            "data.\n"
+            "• LET — 8 parameters (kr_max, L, E, T per phase). More "
+            "flexible; needed for wettability-altered or non-Corey rocks. "
+            "The inverse problem is meaningfully harder; expect broader "
+            "parameter uncertainty from single-rate transient data."
+        ),
+    )
+model_cls   = get_model_class(selected_model_name)
+param_names = list(model_cls.parameter_names)
+
+# Parameter fields, two-column layout by phase, using each model's defaults
+# and display metadata. Widget keys are param-name scoped so state carries
+# over sensibly when the user switches between models that share names
+# (e.g. kr_inj_max exists in both Corey and LET).
+kr_param_values = {}
 col_ki, col_kd = st.columns(2)
 with col_ki:
     st.markdown('<div class="group-label">Injected phase</div>',
                 unsafe_allow_html=True)
-    kr_inj_max = dim_row(
-        "End-point kr_max", 0.6, "kr_inj_max",
-        min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f",
-        help="kr of injected phase at S_inj = 1 − S_r,disp (max sweep).",
-    )
-    n_inj = dim_row(
-        "Corey exponent n", 2.0, "n_inj",
-        min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f",
-        help="Curvature of kr curve: n=1 linear, n=2 quadratic, "
-             "higher = sharper front.",
-    )
+    for name in model_cls.injected_param_names:
+        disp = model_cls.param_display[name]
+        lo, hi = model_cls.parameter_bounds[name]
+        kr_param_values[name] = dim_row(
+            disp["label"], model_cls.defaults[name], f"kr_{name}",
+            min_value=lo, max_value=hi,
+            step=disp["step"], fmt=disp["fmt"],
+            help=disp["help"],
+        )
 with col_kd:
     st.markdown('<div class="group-label">Displaced phase</div>',
                 unsafe_allow_html=True)
-    kr_disp_max = dim_row(
-        "End-point kr_max", 1.0, "kr_disp_max",
-        min_value=0.0, max_value=1.0, step=0.01, fmt="%.3f",
-        help="kr of displaced phase at S_inj = S_r,inj (no sweep).",
-    )
-    n_disp = dim_row(
-        "Corey exponent n", 3.0, "n_disp",
-        min_value=0.5, max_value=10.0, step=0.1, fmt="%.2f",
-        help="Curvature of kr curve: n=1 linear, n=2 quadratic, "
-             "higher = sharper front.",
-    )
+    for name in model_cls.displaced_param_names:
+        disp = model_cls.param_display[name]
+        lo, hi = model_cls.parameter_bounds[name]
+        kr_param_values[name] = dim_row(
+            disp["label"], model_cls.defaults[name], f"kr_{name}",
+            min_value=lo, max_value=hi,
+            step=disp["step"], fmt=disp["fmt"],
+            help=disp["help"],
+        )
 
 # ── Capillary pressure ──────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ CAPILLARY PRESSURE</div>',
@@ -240,8 +264,8 @@ st.session_state["tp_inputs"] = {
     "displaced": displaced,
     "S_inj_r":   s_inj_r,
     "S_disp_r":  s_disp_r,
-    "kr": {"inj_max": kr_inj_max, "n_inj": n_inj,
-           "disp_max": kr_disp_max, "n_disp": n_disp},
+    "kr": {"model":  selected_model_name,
+           "params": dict(kr_param_values)},
     "pc": {"enabled": pc_enabled, "P_entry_mbar": pc_entry_mbar,
            "lambda": pc_lambda},
     "core": {"L_cm": L_cm, "D_cm": D_cm, "A_cm2": A_cm2,
@@ -291,6 +315,9 @@ with st.expander("Collected inputs (debug)", expanded=False):
         f'λ=<code>{pc_lambda:.2f}</code>'
         if pc_enabled else '<b>Pc:</b> <code>off</code>'
     )
+    kr_str = ", ".join(
+        f"{n}=<code>{kr_param_values[n]:.4g}</code>" for n in param_names
+    )
     st.markdown(
         f'<div class="debug-box">'
         f'<b>Injected:</b> {injected["name"]} — '
@@ -300,10 +327,9 @@ with st.expander("Collected inputs (debug)", expanded=False):
         f'<b>S:</b> S_r,inj=<code>{s_inj_r:.3f}</code>, '
         f'S_r,disp=<code>{s_disp_r:.3f}</code>, '
         f'mobile=<code>{mobile_range:.3f}</code><br>'
-        f'<b>kr (initial):</b> kr_max,inj=<code>{kr_inj_max:.3f}</code>, '
-        f'n_inj=<code>{n_inj:.2f}</code>, '
-        f'kr_max,disp=<code>{kr_disp_max:.3f}</code>, '
-        f'n_disp=<code>{n_disp:.2f}</code><br>'
+        f'<b>kr model:</b> <code>{selected_model_name}</code> '
+        f'({len(param_names)} params)<br>'
+        f'<b>kr (initial):</b> {kr_str}<br>'
         f'{pc_line}<br>'
         f'<b>Core:</b> L=<code>{L_cm:.2f} cm</code>, '
         f'D=<code>{D_cm:.2f} cm</code>, '
@@ -516,31 +542,66 @@ with tab_inv:
             label_visibility="collapsed",
             help=(
                 "• Differential Evolution — global, robust to poor initial "
-                "guesses, ~500 forward calls.\n"
+                "guesses. Best default for LET where identifiability is "
+                "harder.\n"
                 "• Nelder-Mead — local simplex with 8 automatic multi-starts "
-                "and log-space kr_max; fast when initial guess is decent.\n"
+                "and log-space transforms; fast when initial guess is decent.\n"
                 "• Levenberg-Marquardt — local gradient-based least-squares; "
                 "fastest when the initial guess is already close."
             ),
         )
 
-    cF1, cF2, cF3, cF4 = st.columns(4)
-    with cF1:
-        fit_kim = st.checkbox("Fit kr_max,inj",  value=True, key="fit_kim")
-    with cF2:
-        fit_ni  = st.checkbox("Fit n_inj",       value=True, key="fit_ni")
-    with cF3:
-        fit_kdm = st.checkbox("Fit kr_max,disp", value=True, key="fit_kdm")
-    with cF4:
-        fit_nd  = st.checkbox("Fit n_disp",      value=True, key="fit_nd")
-    fit_mask = (fit_kim, fit_ni, fit_kdm, fit_nd)
+    # ── Fit-mask UI: "Fit all" master + Advanced expander ───────────────────
+    # Initialize master toggle default once.
+    if "cb_fit_all" not in st.session_state:
+        st.session_state["cb_fit_all"] = True
+
+    fit_all = st.checkbox(
+        "Fit all model parameters", key="cb_fit_all",
+        help="When on, every parameter of the selected model is treated "
+             "as free. Open Advanced (or turn this off) to hold specific "
+             "parameters fixed at their initial guesses above.",
+    )
+
+    # If the master is on, force every individual key to True BEFORE the
+    # widgets render, so opening Advanced shows a consistent state.
+    if fit_all:
+        for name in param_names:
+            st.session_state[f"cb_fit_{name}"] = True
+
+    # Unchecking any individual checkbox turns the master off.
+    def _turn_off_fit_all():
+        st.session_state["cb_fit_all"] = False
+
+    with st.expander("Advanced — select individual parameters",
+                     expanded=not fit_all):
+        st.caption(
+            "Uncheck a parameter to hold it fixed at its initial guess. "
+            "This automatically turns off 'Fit all'. Useful when a "
+            "parameter is known from an independent measurement "
+            "(e.g. steady-state endpoint) and shouldn't be varied."
+        )
+        n_cols = min(4, len(param_names))
+        cols = st.columns(n_cols)
+        individual_mask = []
+        for i, name in enumerate(param_names):
+            with cols[i % n_cols]:
+                individual_mask.append(
+                    st.checkbox(
+                        f"Fit {name}", value=True, key=f"cb_fit_{name}",
+                        on_change=_turn_off_fit_all,
+                    )
+                )
+
+    fit_mask = ([True] * len(param_names)) if fit_all else individual_mask
 
     max_iter = st.number_input(
         "Max optimizer iterations", min_value=10, max_value=2000,
         value=200, step=10, key="inv_maxiter",
         help="Rough budget for the optimizer. Nelder-Mead splits this "
              "across 8 restarts; DE uses it to set max generations; LM "
-             "uses it as max function evaluations.",
+             "uses it as max function evaluations. LET (8 params) needs "
+             "meaningfully more budget than Corey (4).",
     )
 
     if pc_enabled:
@@ -575,22 +636,25 @@ with tab_inv:
         progress_box = st.empty()
         bar          = st.progress(0.0)
 
-        def _progress(i, sse, params):
+        def _progress(i, sse, params_dict):
             bar.progress(min(i / max(int(max_iter) * 2, 1), 1.0))
+            param_str = ", ".join(
+                f"{n}=<code>{v:.4g}</code>"
+                for n, v in params_dict.items()
+            )
             progress_box.markdown(
                 f'<div class="metric-card">'
                 f'<b>Iter {i}</b> — SSE=<code>{sse:.3f}</code><br>'
-                f"kr_max,inj=<code>{params['kr_inj_max']:.3f}</code>, "
-                f"n_inj=<code>{params['n_inj']:.2f}</code>, "
-                f"kr_max,disp=<code>{params['kr_disp_max']:.3f}</code>, "
-                f"n_disp=<code>{params['n_disp']:.2f}</code>"
+                f'{param_str}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-        with st.spinner(f"Running {optimizer_name} optimization…"):
+        with st.spinner(f"Running {optimizer_name} optimization "
+                        f"({selected_model_name}, "
+                        f"{sum(fit_mask)}/{len(fit_mask)} free)…"):
             try:
-                st.session_state["tp_fit"] = fit_corey(
+                st.session_state["tp_fit"] = fit_kr(
                     st.session_state["tp_inputs"],
                     measured_t, measured_dp,
                     fit_mask=fit_mask,
@@ -626,17 +690,19 @@ with tab_inv:
         mt = st.session_state["tp_measured_t"]
         md = st.session_state["tp_measured_dp"]
 
+        fp_lines = ", ".join(
+            f'<b>{n}</b>=<code>{fp[n]:.4g}</code>'
+            for n in fit["param_names"]
+        )
         st.markdown(
             f'<div class="metric-card">'
+            f'<b>Model:</b> <code>{fit.get("model_name", "?")}</code> · '
             f'<b>Optimizer:</b> <code>{fit.get("optimizer_name", "?")}</code> · '
             f'<b>Converged:</b> '
             f'<code>{"yes" if fit["converged"] else "no"}</code> '
             f'({fit["n_calls"]} forward calls) — '
             f'<b>SSE</b>=<code>{fit["sse"]:.3f} mbar²</code><br>'
-            f'<b>kr_max,inj</b>=<code>{fp["kr_inj_max"]:.4f}</code>, '
-            f'<b>n_inj</b>=<code>{fp["n_inj"]:.3f}</code>, '
-            f'<b>kr_max,disp</b>=<code>{fp["kr_disp_max"]:.4f}</code>, '
-            f'<b>n_disp</b>=<code>{fp["n_disp"]:.3f}</code><br>'
+            f'{fp_lines}<br>'
             f'<b>Message:</b> {fit["message"]}'
             f'</div>',
             unsafe_allow_html=True,
@@ -649,13 +715,10 @@ with tab_inv:
             height=460, scrolling=False,
         )
 
-        fitted_inputs = dict(st.session_state["tp_inputs"])
-        fitted_inputs["kr"] = {
-            "inj_max":  fp["kr_inj_max"],
-            "n_inj":    fp["n_inj"],
-            "disp_max": fp["kr_disp_max"],
-            "n_disp":   fp["n_disp"],
-        }
+        # Rebuild fitted-kr curves by injecting fitted params into the
+        # current tp_inputs (preserving the model choice).
+        fitted_inputs = copy.deepcopy(st.session_state["tp_inputs"])
+        fitted_inputs["kr"]["params"] = dict(fp)
         kr_fit = kr_curves(fitted_inputs)
         components.html(
             render_chart_html(build_kr_chart(
@@ -674,12 +737,12 @@ with tab_inv:
         st.download_button(
             "⬇  Download fitted kr curves (.csv)",
             data=csv_bytes,
-            file_name="fitted_kr_curves.csv",
+            file_name=f"fitted_kr_curves_{fit['model_name']}.csv",
             mime="text/csv",
             key="inv_download",
         )
     elif can_fit:
-        st.caption("Click 'Run Inverse Fit' to fit Corey parameters "
+        st.caption("Click 'Run Inverse Fit' to fit model parameters "
                    "against the uploaded data.")
 
 # ── Clear cached results (full-page utility) ────────────────────────────────

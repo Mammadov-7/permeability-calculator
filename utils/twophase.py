@@ -17,9 +17,21 @@ Conventions
   drainage.
 - Saturations outside [S_inj_r, 1 - S_disp_r] are clipped to the
   endpoint values (kr = 0 or kr = kr_max).
+
+Relative-permeability parameterization
+--------------------------------------
+The choice of kr model (Corey, LET, …) is delegated to utils/kr_models.
+This module wraps the selected model with saturation normalization and
+returns kr callables the solver can use. See utils/kr_models.py for
+adding new parameterizations.
+
+Capillary pressure remains hard-coded to Brooks–Corey for now; Phase
+2.3 will make it pluggable using the same pattern as kr_models.
 """
 
 import numpy as np
+
+from utils.kr_models import make_kr_model
 
 
 # ── Normalized saturation ───────────────────────────────────────────────────
@@ -37,19 +49,6 @@ def normalized_saturation(S_inj, S_inj_r, S_disp_r):
         )
     S_n = (np.asarray(S_inj, dtype=float) - S_inj_r) / denom
     return np.clip(S_n, 0.0, 1.0)
-
-
-# ── Corey relative permeabilities ───────────────────────────────────────────
-def corey_kr_inj(S_inj, S_inj_r, S_disp_r, kr_max, n):
-    """kr of injected phase via Corey model: kr = kr_max * S_n^n."""
-    S_n = normalized_saturation(S_inj, S_inj_r, S_disp_r)
-    return kr_max * S_n ** n
-
-
-def corey_kr_disp(S_inj, S_inj_r, S_disp_r, kr_max, n):
-    """kr of displaced phase via Corey model: kr = kr_max * (1 - S_n)^n."""
-    S_n = normalized_saturation(S_inj, S_inj_r, S_disp_r)
-    return kr_max * (1.0 - S_n) ** n
 
 
 # ── Brooks-Corey capillary pressure ─────────────────────────────────────────
@@ -79,19 +78,28 @@ def brooks_corey_pc(S_inj, S_inj_r, S_disp_r, P_entry, lam, S_eff_min=1e-4):
 # ── Convenience factories from tp_inputs dict ───────────────────────────────
 def make_kr_functions(tp_inputs):
     """
-    Returns (kr_inj_fn, kr_disp_fn): callables that take S_inj and
-    return the corresponding relative permeability. Reads from the
-    same dict that pages/2_TwoPhase.py stashes in session_state.
+    Returns (kr_inj_fn, kr_disp_fn): callables that take raw S_inj and
+    return the corresponding relative permeability. Reads the model
+    selection and its parameter values from tp_inputs["kr"]:
+
+        tp_inputs["kr"] = {"model":  <display name, e.g. "Corey" or "LET">,
+                           "params": {<name>: <value>, …}}
+
+    Solver-side code (utils.twophase_solver) doesn't know or care which
+    kr model is in use — it only calls the returned callables.
     """
-    s_ir = tp_inputs["S_inj_r"]
-    s_dr = tp_inputs["S_disp_r"]
-    kr   = tp_inputs["kr"]
+    s_ir  = tp_inputs["S_inj_r"]
+    s_dr  = tp_inputs["S_disp_r"]
+    model = make_kr_model(tp_inputs["kr"]["model"],
+                          tp_inputs["kr"]["params"])
 
     def kr_inj_fn(S_inj):
-        return corey_kr_inj(S_inj, s_ir, s_dr, kr["inj_max"], kr["n_inj"])
+        S_n = normalized_saturation(S_inj, s_ir, s_dr)
+        return model.kr_inj(S_n)
 
     def kr_disp_fn(S_inj):
-        return corey_kr_disp(S_inj, s_ir, s_dr, kr["disp_max"], kr["n_disp"])
+        S_n = normalized_saturation(S_inj, s_ir, s_dr)
+        return model.kr_disp(S_n)
 
     return kr_inj_fn, kr_disp_fn
 
@@ -120,16 +128,18 @@ def make_pc_function(tp_inputs):
 def kr_curves(tp_inputs, n_points=200):
     """
     Sample kr_inj and kr_disp on a uniform grid over S_inj ∈ [0, 1].
-    Returns dict with arrays ready for Plotly.
+    Returns dict with arrays ready for Plotly. The dict also carries
+    the model name so callers (e.g. chart titles) can label the plot.
     """
     S = np.linspace(0.0, 1.0, n_points)
     kr_inj_fn, kr_disp_fn = make_kr_functions(tp_inputs)
     return {
-        "S_inj":    S,
-        "kr_inj":   kr_inj_fn(S),
-        "kr_disp":  kr_disp_fn(S),
-        "S_inj_r":  tp_inputs["S_inj_r"],
-        "S_disp_r": tp_inputs["S_disp_r"],
+        "S_inj":      S,
+        "kr_inj":     kr_inj_fn(S),
+        "kr_disp":    kr_disp_fn(S),
+        "S_inj_r":    tp_inputs["S_inj_r"],
+        "S_disp_r":   tp_inputs["S_disp_r"],
+        "model_name": tp_inputs["kr"]["model"],
     }
 
 
