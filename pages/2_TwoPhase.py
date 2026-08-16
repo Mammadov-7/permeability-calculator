@@ -552,9 +552,17 @@ with tab_inv:
         )
 
     # ── Fit-mask UI: "Fit all" master + Advanced expander ───────────────────
-    # Initialize master toggle default once.
+    # Streamlit raises a warning if a widget has both a `value=` default AND
+    # its key is set via session_state. Fix: initialize every checkbox key
+    # ONCE before any widget renders, then render the widgets WITHOUT passing
+    # `value=`. From that point on the widget reads state from its key.
+
     if "cb_fit_all" not in st.session_state:
         st.session_state["cb_fit_all"] = True
+    for _name in param_names:
+        _k = f"cb_fit_{_name}"
+        if _k not in st.session_state:
+            st.session_state[_k] = True
 
     fit_all = st.checkbox(
         "Fit all model parameters", key="cb_fit_all",
@@ -566,8 +574,8 @@ with tab_inv:
     # If the master is on, force every individual key to True BEFORE the
     # widgets render, so opening Advanced shows a consistent state.
     if fit_all:
-        for name in param_names:
-            st.session_state[f"cb_fit_{name}"] = True
+        for _name in param_names:
+            st.session_state[f"cb_fit_{_name}"] = True
 
     # Unchecking any individual checkbox turns the master off.
     def _turn_off_fit_all():
@@ -588,7 +596,7 @@ with tab_inv:
             with cols[i % n_cols]:
                 individual_mask.append(
                     st.checkbox(
-                        f"Fit {name}", value=True, key=f"cb_fit_{name}",
+                        f"Fit {name}", key=f"cb_fit_{name}",
                         on_change=_turn_off_fit_all,
                     )
                 )
@@ -636,19 +644,48 @@ with tab_inv:
         progress_box = st.empty()
         bar          = st.progress(0.0)
 
+        # ── Estimate the expected number of forward calls per optimizer.
+        # This lets the progress bar reflect actual progress instead of
+        # saturating early, AND lets us throttle callback updates so that
+        # long DE runs don't flood the Streamlit ↔ browser WebSocket (a
+        # DE run with 8 free params can emit 3000+ callbacks; sending
+        # ~7000 messages over half an hour previously caused the
+        # connection to drop and the entire run to be lost).
+        n_free = sum(fit_mask)
+        if optimizer_name == "Differential Evolution":
+            _generations = max(10, int(max_iter) // 12)
+            expected_calls = _generations * 12 * max(n_free, 1) + 100
+        elif optimizer_name == "Nelder-Mead":
+            expected_calls = 8 * max(20, int(max_iter) // 8)
+        elif optimizer_name == "Levenberg-Marquardt":
+            expected_calls = int(max_iter)
+        else:
+            expected_calls = int(max_iter) * 2
+        expected_calls = max(expected_calls, 1)
+        # Target roughly 40 UI updates across the whole run.
+        update_every   = max(1, expected_calls // 40)
+
         def _progress(i, sse, params_dict):
-            bar.progress(min(i / max(int(max_iter) * 2, 1), 1.0))
-            param_str = ", ".join(
-                f"{n}=<code>{v:.4g}</code>"
-                for n, v in params_dict.items()
-            )
-            progress_box.markdown(
-                f'<div class="metric-card">'
-                f'<b>Iter {i}</b> — SSE=<code>{sse:.3f}</code><br>'
-                f'{param_str}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            # Throttle: always show the first call, then every `update_every`.
+            if not (i == 1 or i % update_every == 0):
+                return
+            # Defensive: a broken callback must never abort the fit.
+            try:
+                bar.progress(min(i / expected_calls, 1.0))
+                param_str = ", ".join(
+                    f"{n}=<code>{v:.4g}</code>"
+                    for n, v in params_dict.items()
+                )
+                progress_box.markdown(
+                    f'<div class="metric-card">'
+                    f'<b>Call {i}/~{expected_calls}</b> — '
+                    f'SSE=<code>{sse:.3f}</code><br>'
+                    f'{param_str}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                pass
 
         with st.spinner(f"Running {optimizer_name} optimization "
                         f"({selected_model_name}, "
