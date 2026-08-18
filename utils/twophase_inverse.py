@@ -233,6 +233,15 @@ def _fit_differential_evolution(tp_inputs, model_cls, measured_t, measured_dp,
     # popsize * len(bnds) initial members; maxiter controls generations.
     # For LET (8 free params) at popsize=12, this is ~96 members per generation
     # so total ~ (max_iter // 12) * 96 forward calls worst-case.
+    #
+    # polish=False: DE optionally runs an L-BFGS-B refinement after the main
+    # loop. On the flat/multi-minimum SSE surfaces produced by LET fits to
+    # single-rate transient pressure data, that polish step can thrash
+    # (many gradient iterations, going nowhere useful) for long enough that
+    # a hosted environment declares the WebSocket dead and kills the run
+    # before results can be written back. Disabling polish loses at most a
+    # small local refinement on top of DE's global best — for ill-posed
+    # problems, that refinement was mostly cosmetic anyway.
     opt = differential_evolution(
         objective, bounds=bnds,
         seed=42,
@@ -241,7 +250,7 @@ def _fit_differential_evolution(tp_inputs, model_cls, measured_t, measured_dp,
         tol=1e-4,
         mutation=(0.5, 1.0),
         recombination=0.7,
-        polish=True,       # final L-BFGS-B refinement inside DE
+        polish=False,
         init="sobol",      # quasi-random init for even coverage
         updating="deferred",
     )
