@@ -604,12 +604,12 @@ with tab_inv:
     fit_mask = ([True] * len(param_names)) if fit_all else individual_mask
 
     max_iter = st.number_input(
-        "Max optimizer iterations", min_value=10, max_value=2000,
+        "Optimizer effort", min_value=10, max_value=2000,
         value=200, step=10, key="inv_maxiter",
-        help="Rough budget for the optimizer. Nelder-Mead splits this "
-             "across 8 restarts; DE uses it to set max generations; LM "
-             "uses it as max function evaluations. LET (8 params) needs "
-             "meaningfully more budget than Corey (4).",
+        help="Effort budget. Interpreted per optimizer: "
+            "DE runs ~effort/12 generations of 12×N_params trials each; "
+            "LM uses it as max function evaluations (but may exceed if converging); "
+            "N-M splits it across 8 multi-starts. 200-400 is a reasonable default.",
     )
 
     if pc_enabled:

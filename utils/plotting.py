@@ -114,7 +114,7 @@ def build_kr_chart(kr_data, inj_name="Injected", disp_name="Displaced"):
         fig,
         "<b>S_inj  [-]</b>", "<b>kr  [-]</b>",
         (0.0, 1.0), (0.0, y_max),
-        "Relative permeability curves (Corey)",
+        f"Relative permeability curves ({kr_data.get('model_name', 'Corey')})",
         showlegend=True,
     )
     return fig
