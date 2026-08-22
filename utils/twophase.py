@@ -18,20 +18,22 @@ Conventions
 - Saturations outside [S_inj_r, 1 - S_disp_r] are clipped to the
   endpoint values (kr = 0 or kr = kr_max).
 
-Relative-permeability parameterization
---------------------------------------
-The choice of kr model (Corey, LET, …) is delegated to utils/kr_models.
-This module wraps the selected model with saturation normalization and
-returns kr callables the solver can use. See utils/kr_models.py for
-adding new parameterizations.
+Parameterization
+----------------
+Both relative permeability and capillary pressure use pluggable model
+frameworks; the choice of parameterization is delegated to:
+    - utils/kr_models  (Corey, LET, …)
+    - utils/pc_models  (Brooks-Corey, van Genuchten, …)
 
-Capillary pressure remains hard-coded to Brooks–Corey for now; Phase
-2.3 will make it pluggable using the same pattern as kr_models.
+This module wraps the selected models with saturation normalization
+and returns callables the solver can use. See kr_models.py / pc_models.py
+for adding new parameterizations.
 """
 
 import numpy as np
 
 from utils.kr_models import make_kr_model
+from utils.pc_models import make_pc_model
 
 
 # ── Normalized saturation ───────────────────────────────────────────────────
@@ -49,30 +51,6 @@ def normalized_saturation(S_inj, S_inj_r, S_disp_r):
         )
     S_n = (np.asarray(S_inj, dtype=float) - S_inj_r) / denom
     return np.clip(S_n, 0.0, 1.0)
-
-
-# ── Brooks-Corey capillary pressure ─────────────────────────────────────────
-def brooks_corey_pc(S_inj, S_inj_r, S_disp_r, P_entry, lam, S_eff_min=1e-4):
-    """
-    Brooks-Corey drainage Pc, in terms of wetting-phase effective
-    saturation (assumes injected = non-wetting):
-
-        S_w     = 1 - S_inj
-        S_w_eff = (S_w - S_disp_r) / (1 - S_disp_r)
-        Pc      = P_entry * S_w_eff ** (-1 / lambda)
-
-    Pc shares units with P_entry (mbar in this project).
-    S_eff_min clamps S_w_eff away from zero to avoid the singularity
-    as the wetting phase approaches its residual saturation.
-    Pc = P_entry at S_w_eff = 1 (entry/threshold pressure), rising
-    monotonically as S_w decreases.
-    """
-    if 1.0 - S_disp_r <= 0.0:
-        raise ValueError("S_disp_r must be < 1.")
-    S_w     = 1.0 - np.asarray(S_inj, dtype=float)
-    S_w_eff = (S_w - S_disp_r) / (1.0 - S_disp_r)
-    S_w_eff = np.clip(S_w_eff, S_eff_min, 1.0)
-    return P_entry * S_w_eff ** (-1.0 / lam)
 
 
 # ── Convenience factories from tp_inputs dict ───────────────────────────────
@@ -106,20 +84,37 @@ def make_kr_functions(tp_inputs):
 
 def make_pc_function(tp_inputs):
     """
-    Returns a Pc(S_inj) callable. If capillary pressure is disabled,
-    returns a function that yields zeros. Output units = mbar.
+    Returns a Pc(S_inj) callable. Output units = mbar. Reads the Pc
+    model selection and its parameters from tp_inputs["pc"]:
+
+        tp_inputs["pc"] = {"enabled": True|False,
+                           "model":   <display name>,
+                           "params":  {<name>: <value>, …}}
+
+    If capillary pressure is disabled, returns a function that yields
+    zeros. Solver-side code doesn't know or care which Pc model is in
+    use — it only calls the returned callable.
+
+    Saturation transform (S_inj → S_w_eff of the wetting phase) is
+    handled here; the model itself receives normalized wetting-phase
+    saturation and returns Pc in mbar.
     """
-    pc = tp_inputs["pc"]
-    if not pc["enabled"]:
+    pc_cfg = tp_inputs["pc"]
+    if not pc_cfg["enabled"]:
         return lambda S_inj: np.zeros_like(np.asarray(S_inj, dtype=float))
 
-    s_ir = tp_inputs["S_inj_r"]
-    s_dr = tp_inputs["S_disp_r"]
-    P_e  = pc["P_entry_mbar"]
-    lam  = pc["lambda"]
+    if 1.0 - tp_inputs["S_disp_r"] <= 0.0:
+        raise ValueError("S_disp_r must be < 1.")
+
+    s_dr  = tp_inputs["S_disp_r"]
+    model = make_pc_model(pc_cfg["model"], pc_cfg["params"])
 
     def pc_fn(S_inj):
-        return brooks_corey_pc(S_inj, s_ir, s_dr, P_e, lam)
+        # Wetting-phase saturation, then effective (normalized) form.
+        S_w     = 1.0 - np.asarray(S_inj, dtype=float)
+        S_w_eff = (S_w - s_dr) / (1.0 - s_dr)
+        # Clipping to (0, 1] happens inside model.pc().
+        return model.pc(S_w_eff)
 
     return pc_fn
 
@@ -146,12 +141,14 @@ def kr_curves(tp_inputs, n_points=200):
 def pc_curve(tp_inputs, n_points=200):
     """
     Sample Pc on a uniform grid over S_inj ∈ [0, 1]. Returns dict with
-    arrays ready for Plotly. If Pc is disabled, Pc_mbar is all zeros.
+    arrays ready for Plotly. If Pc is disabled, Pc_mbar is all zeros
+    and model_name is None.
     """
     S = np.linspace(0.0, 1.0, n_points)
     pc_fn = make_pc_function(tp_inputs)
     return {
-        "S_inj":   S,
-        "Pc_mbar": pc_fn(S),
-        "enabled": tp_inputs["pc"]["enabled"],
+        "S_inj":      S,
+        "Pc_mbar":    pc_fn(S),
+        "enabled":    tp_inputs["pc"]["enabled"],
+        "model_name": tp_inputs["pc"].get("model") if tp_inputs["pc"]["enabled"] else None,
     }

@@ -36,6 +36,7 @@ from utils.units import (
     convert, convert_injection_rate,
 )
 from utils.kr_models import KR_MODEL_CHOICES, get_model_class
+from utils.pc_models import PC_MODEL_CHOICES, get_pc_model_class
 from utils.twophase import kr_curves, pc_curve
 from utils.twophase_solver import run_forward
 from utils.twophase_inverse import fit_kr, OPTIMIZER_CHOICES
@@ -179,31 +180,48 @@ with col_kd:
 st.markdown('<div class="section-label">▌ CAPILLARY PRESSURE</div>',
             unsafe_allow_html=True)
 pc_enabled = st.checkbox(
-    "Include capillary pressure (Brooks–Corey)",
+    "Include capillary pressure",
     value=False, key="pc_enabled",
     help="When enabled, the simulator includes a capillary-diffusion "
          "term that smooths the saturation front. Each forward call "
          "becomes significantly slower.",
 )
-pc_entry_mbar = None
-pc_lambda     = None
+
+selected_pc_model_name = "Brooks-Corey"  # default when Pc is disabled
+pc_param_values        = {}
+
 if pc_enabled:
-    col_pe, col_pl = st.columns(2)
-    with col_pe:
-        pc_entry_val, pc_entry_u = input_row(
-            "Entry pressure P_e", 100.0, DP_TO_MBAR,
-            "pc_entry", default_unit="mbar",
-            help="Brooks–Corey threshold entry pressure of the "
-                 "non-wetting (injected) phase.",
+    col_m_lbl, col_m_sel = st.columns([1.2, 2.8])
+    with col_m_lbl:
+        st.markdown('<div class="row-label">Model</div>',
+                    unsafe_allow_html=True)
+    with col_m_sel:
+        selected_pc_model_name = st.selectbox(
+            "Pc model", PC_MODEL_CHOICES, index=0,
+            key="pc_model", label_visibility="collapsed",
+            help=(
+                "• Brooks-Corey — 2 parameters (P_entry, λ). Sharp entry "
+                "threshold; industry-standard default.\n"
+                "• van Genuchten — 2 parameters (α, n) with Mualem-linked "
+                "m = 1 − 1/n. Smooth transition; preferred for wettability-"
+                "altered rocks or where BC's threshold step doesn't fit."
+            ),
         )
-        pc_entry_mbar = convert(pc_entry_val, pc_entry_u, DP_TO_MBAR)
-    with col_pl:
-        pc_lambda = dim_row(
-            "Pore-size index λ", 2.0, "pc_lambda",
-            min_value=0.1, max_value=10.0, step=0.1, fmt="%.2f",
-            help="Brooks–Corey pore-size distribution index. "
-                 "Smaller λ ⇒ wider pore-size distribution.",
-        )
+    pc_model_cls   = get_pc_model_class(selected_pc_model_name)
+    pc_param_names = list(pc_model_cls.parameter_names)
+
+    n_cols = min(2, len(pc_param_names))
+    cols = st.columns(n_cols)
+    for i, name in enumerate(pc_param_names):
+        with cols[i % n_cols]:
+            disp = pc_model_cls.param_display[name]
+            lo, hi = pc_model_cls.parameter_bounds[name]
+            pc_param_values[name] = dim_row(
+                disp["label"], pc_model_cls.defaults[name], f"pc_{name}",
+                min_value=lo, max_value=hi,
+                step=disp["step"], fmt=disp["fmt"],
+                help=disp["help"],
+            )
 
 # ── Rock & core geometry ────────────────────────────────────────────────────
 st.markdown('<div class="section-label">▌ ROCK & CORE GEOMETRY</div>',
@@ -266,8 +284,9 @@ st.session_state["tp_inputs"] = {
     "S_disp_r":  s_disp_r,
     "kr": {"model":  selected_model_name,
            "params": dict(kr_param_values)},
-    "pc": {"enabled": pc_enabled, "P_entry_mbar": pc_entry_mbar,
-           "lambda": pc_lambda},
+    "pc": {"enabled": pc_enabled,
+        "model":   selected_pc_model_name,
+        "params":  dict(pc_param_values)},
     "core": {"L_cm": L_cm, "D_cm": D_cm, "A_cm2": A_cm2,
              "phi": phi, "k_mD": k_mD},
     "operating": {"q_ml_min": q_ml_min, "P_back_bar": p_back_bar,
@@ -292,10 +311,8 @@ if q_ml_min   <= 0: input_errors.append("Injection rate must be > 0.")
 if t_total_min <= 0: input_errors.append("Total time must be > 0.")
 if injected["viscosity_cP"]  <= 0 or displaced["viscosity_cP"] <= 0:
     input_errors.append("Phase viscosities must be > 0.")
-if pc_enabled and pc_entry_mbar is not None and pc_entry_mbar <= 0:
-    input_errors.append("Capillary entry pressure must be > 0.")
-if pc_enabled and pc_lambda is not None and pc_lambda <= 0:
-    input_errors.append("Pore-size index λ must be > 0.")
+if pc_enabled and not pc_param_values:
+    input_errors.append("Pc is enabled but no parameters were collected.")
 
 ready_to_run = len(input_errors) == 0
 
@@ -309,12 +326,15 @@ if input_errors:
 
 # ── Collapsed debug readout ─────────────────────────────────────────────────
 with st.expander("Collected inputs (debug)", expanded=False):
-    pc_line = (
-        f'<b>Pc:</b> Brooks–Corey, '
-        f'P_e=<code>{pc_entry_mbar:.2f} mbar</code>, '
-        f'λ=<code>{pc_lambda:.2f}</code>'
-        if pc_enabled else '<b>Pc:</b> <code>off</code>'
-    )
+    if pc_enabled:
+        pc_params_str = ", ".join(
+            f"{n}=<code>{pc_param_values[n]:.4g}</code>"
+            for n in pc_param_names
+        )
+        pc_line = (f'<b>Pc:</b> {selected_pc_model_name} '
+                   f'({len(pc_param_names)} params): {pc_params_str}')
+    else:
+        pc_line = '<b>Pc:</b> <code>off</code>'
     kr_str = ", ".join(
         f"{n}=<code>{kr_param_values[n]:.4g}</code>" for n in param_names
     )

@@ -140,7 +140,7 @@ def build_pc_chart(pc_data, S_inj_r, S_disp_r):
         fig,
         "<b>S_inj  [-]</b>", "<b>Pc  [mbar]</b>",
         (0.0, 1.0), (y_min, y_max),
-        "Capillary pressure (Brooks–Corey)",
+        f"Capillary pressure ({pc_data.get('model_name', 'Brooks–Corey')})",
         y_log=True,
     )
     return fig
