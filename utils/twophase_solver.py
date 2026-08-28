@@ -7,7 +7,7 @@ Pure NumPy. No Streamlit. Pyodide-compatible.
 Discretization
 --------------
 - Cell-centered finite volume, N cells of width dx = L/N.
-- Saturation advance: explicit upwind for f_inj·u_t (rightward flow),
+- Saturation advance: explicit upwind for f_inj * u_t (rightward flow),
   central differences for the capillary diffusion term.
 - Adaptive time step from min(advective CFL, diffusive CFL); each
   step is also clipped to land on the next snapshot / t_total.
@@ -16,6 +16,60 @@ Boundary conditions
 -------------------
 - Inlet  (x=0): u_inj = u_t (100 % injected entering); no Pc flux.
 - Outlet (x=L): zero-gradient outflow; no Pc flux.
+
+Process-type awareness (Phase 2.4)
+----------------------------------
+The solver reads tp_inputs["process_type"] to determine the sign of
+the capillary flux term applied to the injected phase.
+
+Under drainage the injected phase is non-wetting. Starting from the
+two-phase Darcy equations with Pc = P_nw - P_w and total velocity
+u_t = u_w + u_nw, the non-wetting phase velocity is
+
+    u_nw = f_nw * u_t - k * M * dPc/dx      with  M = lambda_w * lambda_nw / (lambda_w + lambda_nw)
+
+The minus sign in front of the capillary term is the standard result
+for the non-wetting phase: high Pc upstream (= high P_nw relative to
+P_w) drives the non-wetting phase downstream, but the gradient of Pc
+enters with a negative sign because the fractional-flow rearrangement
+absorbs the wetting-phase pressure gradient.
+
+Under imbibition the injected phase is wetting. The mirror derivation
+gives
+
+    u_w = f_w * u_t + k * M * dPc/dx
+
+which is the same magnitude but the opposite sign in front of the
+capillary term. Physically this represents the spontaneous
+imbibition drive: the wetting phase is pulled forward by capillary
+suction into its preferred pores rather than being resisted by
+capillarity.
+
+The solver therefore sets `pc_sign` = -1 for drainage, +1 for
+imbibition, and applies `u_inj_face += pc_sign * k * M_face * dPc/dx`
+uniformly. All other physics (advective flux, boundary conditions,
+CFL time-step, saturation clipping) is process-type-agnostic.
+
+Initial condition
+-----------------
+Both processes initialize S_inj := S_inj_r. The physical meaning
+differs:
+
+    drainage   -- initial S_inj_r is the connate injected-phase
+                  saturation; typically 0 for a fully wetting-phase-
+                  saturated core (S_w = 1). Under drainage the
+                  invading phase then rises from S_inj_r toward
+                  1 - S_disp_r.
+
+    imbibition -- initial S_inj_r equals S_wr (residual water); the
+                  core starts at maximum non-wetting saturation
+                  (S_w = S_wr, i.e. S_inj = S_wr under the labelling
+                  where injected = wetting) and imbibition increases
+                  S_inj toward 1 - S_disp_r = 1 - S_or.
+
+The same numerical initialization line therefore serves both
+processes; the user sets S_inj_r and S_disp_r to values appropriate
+to whichever process they've selected.
 
 Units
 -----
@@ -29,7 +83,7 @@ import numpy as np
 from utils.twophase import make_kr_functions, make_pc_function
 
 
-# ── Unit conversions ────────────────────────────────────────────────────────
+# -- Unit conversions -------------------------------------------------------
 CM_TO_M        = 1e-2
 CM2_TO_M2      = 1e-4
 ML_MIN_TO_M3_S = 1e-6 / 60.0
@@ -51,9 +105,11 @@ def run_forward(tp_inputs,
     Parameters
     ----------
     tp_inputs : dict
-        From st.session_state["tp_inputs"] (Step 3 layout).
+        From st.session_state["tp_inputs"] (Step 3 layout). Must
+        include the key "process_type" ("drainage" or "imbibition");
+        defaults to "drainage" if absent for backward compatibility.
     n_snapshots : int
-        Number of (t, ΔP, profile) samples recorded.
+        Number of (t, dP, profile) samples recorded.
     cfl_safety : float
         Multiplier (< 1) applied to the CFL time-step limit.
     bt_threshold : float
@@ -64,13 +120,27 @@ def run_forward(tp_inputs,
     Returns
     -------
     dict with keys: x_cm, t_min, dP_mbar, PVI, S_inj_profiles,
-    BT_PVI, BT_time_min, N, dx_cm, PV_ml, u_t_m_s, n_steps.
+    BT_PVI, BT_time_min, N, dx_cm, PV_ml, u_t_m_s, n_steps,
+    process_type.
     """
 
-    # ── 1. Unpack and SI-convert ────────────────────────────────────────────
+    # -- 1. Unpack and SI-convert -------------------------------------------
     core = tp_inputs["core"]
     op   = tp_inputs["operating"]
     num  = tp_inputs["numerical"]
+    process_type = tp_inputs.get("process_type", "drainage")
+
+    # Sign of the capillary flux term applied to the injected phase.
+    # See module docstring for the derivation.
+    if process_type == "drainage":
+        pc_sign = -1.0
+    elif process_type == "imbibition":
+        pc_sign = +1.0
+    else:
+        raise ValueError(
+            f"Unknown process_type '{process_type}'. "
+            f"Expected 'drainage' or 'imbibition'."
+        )
 
     L   = core["L_cm"]  * CM_TO_M
     A   = core["A_cm2"] * CM2_TO_M2
@@ -80,7 +150,7 @@ def run_forward(tp_inputs,
     mu_inj  = tp_inputs["injected"]["viscosity_cP"]  * CP_TO_PA_S
     mu_disp = tp_inputs["displaced"]["viscosity_cP"] * CP_TO_PA_S
 
-    q   = op["q_ml_min"] * ML_MIN_TO_M3_S     # [m³/s]
+    q   = op["q_ml_min"] * ML_MIN_TO_M3_S     # [m^3/s]
     u_t = q / A                               # [m/s]
     t_total = op["t_total_min"] * 60.0        # [s]
 
@@ -90,9 +160,9 @@ def run_forward(tp_inputs,
     N   = int(num["N_cells"])
     dx  = L / N
     x_centers_m = (np.arange(N) + 0.5) * dx
-    PV  = phi * A * L                         # [m³]
+    PV  = phi * A * L                         # [m^3]
 
-    # ── 2. kr / Pc closures ─────────────────────────────────────────────────
+    # -- 2. kr / Pc closures ------------------------------------------------
     kr_inj_fn, kr_disp_fn = make_kr_functions(tp_inputs)
     pc_mbar_fn = make_pc_function(tp_inputs)
 
@@ -109,7 +179,7 @@ def run_forward(tp_inputs,
         l_i, _, l_t = mobilities(S)
         return np.where(l_t > 0.0, l_i / l_t, 0.0)
 
-    # ── 3. CFL estimates over a fine S grid ────────────────────────────────
+    # -- 3. CFL estimates over a fine S grid --------------------------------
     S_fine    = np.linspace(S_inj_r, 1.0 - S_disp_r, 800)
     f_fine    = frac_flow(S_fine)
     dfdS_max  = max(float(np.max(np.abs(np.gradient(f_fine, S_fine)))),
@@ -120,12 +190,14 @@ def run_forward(tp_inputs,
         M_fine     = np.where(lt_f > 0.0, li_f * ld_f / lt_f, 0.0)
         Pc_fine    = pc_fn(S_fine)
         dPcdS_fine = np.gradient(Pc_fine, S_fine)
-        # M -> 0 at both saturation endpoints, so this self-regularizes
+        # M -> 0 at both saturation endpoints, so this self-regularizes.
+        # abs() means the CFL bound is agnostic to the sign of Pc, which
+        # matters for imbibition Skjaeveland where Pc can go negative.
         D_cap_max  = float(np.max(k * M_fine * np.abs(dPcdS_fine) / phi))
     else:
         D_cap_max = 0.0
 
-    # ── 4. Initial condition ────────────────────────────────────────────────
+    # -- 4. Initial condition -----------------------------------------------
     S = np.full(N, S_inj_r, dtype=float)
 
     snap_times = np.linspace(0.0, t_total, n_snapshots)
@@ -145,7 +217,7 @@ def run_forward(tp_inputs,
     next_snap = 1
     bt_PVI, bt_time = None, None
 
-    # ── 5. Time loop ────────────────────────────────────────────────────────
+    # -- 5. Time loop -------------------------------------------------------
     t = 0.0
     step = 0
     for step in range(max_steps):
@@ -173,7 +245,10 @@ def run_forward(tp_inputs,
 
             dPc_dx_face        = np.zeros(N + 1)
             dPc_dx_face[1:-1]  = (Pc_cells[1:] - Pc_cells[:-1]) / dx
-            u_inj_face        += -k * M_face * dPc_dx_face
+            # pc_sign = -1 for drainage (injected is non-wetting),
+            # pc_sign = +1 for imbibition (injected is wetting). See
+            # module docstring for the derivation.
+            u_inj_face        += pc_sign * k * M_face * dPc_dx_face
 
         # Time step from CFL
         dt_adv = cfl_safety * phi * dx / (u_t * dfdS_max)
@@ -222,4 +297,5 @@ def run_forward(tp_inputs,
         "PV_ml":          PV * 1e6,
         "u_t_m_s":        u_t,
         "n_steps":        step + 1,
+        "process_type":   process_type,
     }

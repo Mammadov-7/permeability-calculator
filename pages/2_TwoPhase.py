@@ -6,13 +6,48 @@ relative permeability and capillary pressure analysis of core-flood
 experiments. Inputs are collected at the top of the page; results
 appear in the Forward and Inverse tabs below.
 
+Process-type awareness (Phase 2.4)
+----------------------------------
+The user selects drainage (injected phase is non-wetting) or
+imbibition (injected phase is wetting) at the top of the page.
+Switching process type:
+
+    1. Auto-swaps the two phase-picker selections so the same fluid
+       pair keeps its physical roles (a fluid that was wetting in the
+       drainage view remains wetting in the imbibition view; it just
+       moves from the "displaced" column to the "injected" column).
+
+    2. Re-labels the phase-picker headers to make the wettability
+       role explicit ("Injected (wetting) phase" under imbibition).
+
+    3. Filters the Pc-model dropdown to models whose class attribute
+       process_types includes the current process. Brooks-Corey and
+       van Genuchten remain available only for drainage; Skjaeveland
+       remains available only for imbibition. This is a physics
+       constraint enforced at the widget level -- a drainage model
+       under imbibition (or vice versa) would produce nonsense.
+
+    4. Clears cached forward-simulation and inverse-fit results, since
+       the physics assumptions have changed and prior results are no
+       longer valid.
+
+The kr framework is process-type-agnostic: Corey and LET are
+symmetric under phase relabeling, so the same 4- or 8-parameter set
+represents kr for either process. Users are responsible for choosing
+physically sensible parameter values for the process they've selected.
+
 Module map
 ----------
 utils.kr_models         : Pluggable kr parameterizations (Corey, LET).
-utils.twophase          : kr / Pc factories using the selected model.
-utils.twophase_solver   : 1D IMPES forward simulator.
+utils.pc_models         : Pluggable Pc parameterizations (Brooks-Corey,
+                          van Genuchten, Skjaeveland).
+utils.twophase          : kr / Pc factories using the selected model,
+                          with process-type-aware Pc saturation mapping.
+utils.twophase_solver   : 1D IMPES forward simulator; process-type-aware
+                          capillary flux sign.
 utils.twophase_inverse  : Model-agnostic optimizer dispatcher.
-utils.plotting          : Plotly chart builders.
+utils.plotting          : Plotly chart builders; process-type-aware Pc
+                          chart (log for drainage, linear for imbibition).
 utils.phases            : Phase library + phase-picker widget.
 utils.units             : Unit-conversion tables and helpers.
 utils.ui                : Shared CSS + input-row helpers.
@@ -36,7 +71,9 @@ from utils.units import (
     convert, convert_injection_rate,
 )
 from utils.kr_models import KR_MODEL_CHOICES, get_model_class
-from utils.pc_models import PC_MODEL_CHOICES, get_pc_model_class
+from utils.pc_models import (
+    PC_MODEL_CHOICES, get_pc_model_class, pc_models_for_process,
+)
 from utils.twophase import kr_curves, pc_curve
 from utils.twophase_solver import run_forward
 from utils.twophase_inverse import fit_kr, OPTIMIZER_CHOICES
@@ -71,18 +108,149 @@ with st.expander("Phase library (download / upload custom phases)",
                  expanded=False):
     io_buttons()
 
+# ════════════════════════════════════════════════════════════════════════════
+# PROCESS TYPE  (Phase 2.4)
+# ════════════════════════════════════════════════════════════════════════════
+# Placed at the top of the input flow because process type governs the
+# meaning of every downstream selection: which phase is wetting, which
+# Pc models are physically valid, and how the solver signs the capillary
+# flux term. See the file docstring for the full list of consequences.
+
+# Defaults for each process type. Under drainage the injected phase is the
+# non-wetting phase (H2 for gas storage studies); under imbibition it is
+# the wetting phase (brine flooding). The auto-swap logic uses these only
+# for the first-ever render; subsequent process-type toggles swap whatever
+# the user has currently picked, preserving custom selections.
+_DEFAULT_INJ_DRAINAGE  = "H2"
+_DEFAULT_DISP_DRAINAGE = "Brine (3% NaCl)"
+
+# Phase-picker key convention. This must match utils/phases.py — see the
+# _swap_phase_picker_state callback below for the assumption we're making
+# about the widget's session_state keys. If phase_picker uses different
+# keys, this block is the one to touch.
+
+_PHASE_KEY_INJ  = "inj_choice"
+_PHASE_KEY_DISP = "disp_choice"
+
+# Result-cache keys cleared whenever process type changes (the underlying
+# physics has changed, so prior forward and inverse runs are invalid).
+_RESULT_CACHE_KEYS = (
+    "tp_results", "tp_results_hash", "tp_results_error",
+    "tp_fit", "tp_fit_hash", "tp_fit_error",
+    "tp_measured_t", "tp_measured_dp",
+)
+
+
+def _swap_phase_picker_state():
+    """
+    on_change callback for the PROCESS TYPE radio.
+
+    Auto-swap semantics (Q3 option B): when the user toggles between
+    drainage and imbibition, the two phase-picker selections are
+    swapped in-place so the same fluid pair keeps its physical roles.
+    A user who set up a Methane / Water pair under drainage will find
+    Water / Methane in the injected / displaced slots after switching
+    to imbibition — the wetting phase (Water) has moved from the
+    "displaced" column into the "injected" column, matching the
+    imbibition convention that injected = wetting.
+
+    Also clears any cached forward-simulation and inverse-fit results
+    since the physics has changed and stored results are no longer
+    valid for the new process type.
+
+    The two phase-picker widgets store their current selection under
+    session_state keys _PHASE_KEY_INJ and _PHASE_KEY_DISP (see the
+    key convention above). If either key is missing (first render, or
+    if phase_picker's internals change), the swap is a no-op for that
+    slot and the widget falls back to its default parameter.
+    """
+    have_inj  = _PHASE_KEY_INJ  in st.session_state
+    have_disp = _PHASE_KEY_DISP in st.session_state
+    if have_inj and have_disp:
+        (st.session_state[_PHASE_KEY_INJ],
+         st.session_state[_PHASE_KEY_DISP]) = (
+            st.session_state[_PHASE_KEY_DISP],
+            st.session_state[_PHASE_KEY_INJ],
+        )
+    # Clear cached results; new physics needs a fresh run.
+    for k in _RESULT_CACHE_KEYS:
+        st.session_state.pop(k, None)
+
+
+st.markdown('<div class="section-label">▌ PROCESS TYPE</div>',
+            unsafe_allow_html=True)
+
+col_pt_lbl, col_pt_sel = st.columns([1.2, 2.8])
+with col_pt_lbl:
+    st.markdown('<div class="row-label">Process</div>',
+                unsafe_allow_html=True)
+with col_pt_sel:
+    process_type = st.radio(
+        "Process type",
+        options=["drainage", "imbibition"],
+        index=0,
+        key="process_type",
+        horizontal=True,
+        label_visibility="collapsed",
+        on_change=_swap_phase_picker_state,
+        help=(
+            "• drainage — the non-wetting phase (e.g. H₂, CO₂, gas) "
+            "invades a core initially saturated with the wetting phase "
+            "(brine). Pc > 0 throughout; use Brooks-Corey or van "
+            "Genuchten.\n"
+            "• imbibition — the wetting phase (typically brine) invades "
+            "a core at maximum non-wetting saturation. Pc can go "
+            "negative in mixed-wet systems; use Skjaeveland."
+        ),
+    )
+
+# Small info card explaining what the phase-picker labels mean under
+# each process. Sits directly under the radio to catch the user's eye
+# at the moment they'd otherwise be confused by the swap.
+if process_type == "drainage":
+    st.markdown(
+        '<div class="info-box">Under <b>drainage</b>, the '
+        '<i>injected phase</i> is the <b>non-wetting</b> fluid '
+        '(gas / H₂ / CO₂) and the <i>displaced phase</i> is the '
+        '<b>wetting</b> fluid (brine). Capillary pressure is strictly '
+        'positive; the invading phase must exceed the entry pressure '
+        'to enter each pore throat.</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div class="info-box">Under <b>imbibition</b>, the '
+        '<i>injected phase</i> is the <b>wetting</b> fluid (typically '
+        'brine) and the <i>displaced phase</i> is the <b>non-wetting</b> '
+        'fluid (gas / oil). Capillary pressure can be negative in '
+        'mixed-wet saturation ranges; use the Skjaeveland Pc model to '
+        'capture wettability transitions.</div>',
+        unsafe_allow_html=True,
+    )
+
 # ── Phase selection ─────────────────────────────────────────────────────────
+# Labels reflect the wettability role established by process_type. Defaults
+# are only used on first render (no _PHASE_KEY_* in session_state); on
+# subsequent process-type toggles, _swap_phase_picker_state has already
+# updated session_state to preserve the user's fluid choices.
 st.markdown('<div class="section-label">▌ PHASE SELECTION</div>',
             unsafe_allow_html=True)
+if process_type == "drainage":
+    inj_column_label  = "Injected (non-wetting) phase"
+    disp_column_label = "Displaced (wetting) phase"
+else:
+    inj_column_label  = "Injected (wetting) phase"
+    disp_column_label = "Displaced (non-wetting) phase"
+
 col_inj, col_res = st.columns(2)
 with col_inj:
-    st.markdown('<div class="group-label">Injected phase</div>',
+    st.markdown(f'<div class="group-label">{inj_column_label}</div>',
                 unsafe_allow_html=True)
-    injected = phase_picker("inj", default="H2")
+    injected = phase_picker("inj", default=_DEFAULT_INJ_DRAINAGE)
 with col_res:
-    st.markdown('<div class="group-label">Displaced phase</div>',
+    st.markdown(f'<div class="group-label">{disp_column_label}</div>',
                 unsafe_allow_html=True)
-    displaced = phase_picker("disp", default="Brine (3% NaCl)")
+    displaced = phase_picker("disp", default=_DEFAULT_DISP_DRAINAGE)
 
 if injected["type"] == displaced["type"]:
     st.markdown(
@@ -97,22 +265,24 @@ st.markdown('<div class="section-label">▌ SATURATION ENDPOINTS</div>',
             unsafe_allow_html=True)
 col_si, col_sd = st.columns(2)
 with col_si:
-    st.markdown('<div class="group-label">Injected phase</div>',
+    st.markdown(f'<div class="group-label">{inj_column_label}</div>',
                 unsafe_allow_html=True)
     s_inj_r_val, s_inj_r_u = input_row(
         "S_r (residual)", 0.0, POROSITY_TO_FRACTION,
         "s_inj_r", default_unit="fraction",
         help="Residual saturation of the injected phase; kr_inj = 0 "
-             "at and below this saturation.",
+             "at and below this saturation. Under imbibition this "
+             "equals the connate water saturation S_wr.",
     )
 with col_sd:
-    st.markdown('<div class="group-label">Displaced phase</div>',
+    st.markdown(f'<div class="group-label">{disp_column_label}</div>',
                 unsafe_allow_html=True)
     s_disp_r_val, s_disp_r_u = input_row(
         "S_r (residual)", 0.20, POROSITY_TO_FRACTION,
         "s_disp_r", default_unit="fraction",
         help="Residual saturation of the displaced phase that cannot "
-             "be swept by injection.",
+             "be swept by injection. Under imbibition this equals the "
+             "residual oil / non-wetting saturation S_or.",
     )
 s_inj_r  = convert(s_inj_r_val,  s_inj_r_u,  POROSITY_TO_FRACTION)
 s_disp_r = convert(s_disp_r_val, s_disp_r_u, POROSITY_TO_FRACTION)
@@ -139,7 +309,10 @@ with col_m_sel:
             "• LET — 8 parameters (kr_max, L, E, T per phase). More "
             "flexible; needed for wettability-altered or non-Corey rocks. "
             "The inverse problem is meaningfully harder; expect broader "
-            "parameter uncertainty from single-rate transient data."
+            "parameter uncertainty from single-rate transient data.\n"
+            "Both models are process-type-agnostic: the same parameter "
+            "set represents kr under either drainage or imbibition, "
+            "with 'injected' relabeled per the process."
         ),
     )
 model_cls   = get_model_class(selected_model_name)
@@ -152,7 +325,7 @@ param_names = list(model_cls.parameter_names)
 kr_param_values = {}
 col_ki, col_kd = st.columns(2)
 with col_ki:
-    st.markdown('<div class="group-label">Injected phase</div>',
+    st.markdown(f'<div class="group-label">{inj_column_label}</div>',
                 unsafe_allow_html=True)
     for name in model_cls.injected_param_names:
         disp = model_cls.param_display[name]
@@ -164,7 +337,7 @@ with col_ki:
             help=disp["help"],
         )
 with col_kd:
-    st.markdown('<div class="group-label">Displaced phase</div>',
+    st.markdown(f'<div class="group-label">{disp_column_label}</div>',
                 unsafe_allow_html=True)
     for name in model_cls.displaced_param_names:
         disp = model_cls.param_display[name]
@@ -177,6 +350,11 @@ with col_kd:
         )
 
 # ── Capillary pressure ──────────────────────────────────────────────────────
+# Pc-model dropdown is filtered by process_type so the user cannot pick
+# a drainage model (BC, vG) under imbibition or an imbibition model
+# (Skjaeveland) under drainage. If the previously selected model becomes
+# invalid after a process-type toggle, we reset the widget key so it
+# picks up the first valid model as its default.
 st.markdown('<div class="section-label">▌ CAPILLARY PRESSURE</div>',
             unsafe_allow_html=True)
 pc_enabled = st.checkbox(
@@ -184,11 +362,23 @@ pc_enabled = st.checkbox(
     value=False, key="pc_enabled",
     help="When enabled, the simulator includes a capillary-diffusion "
          "term that smooths the saturation front. Each forward call "
-         "becomes significantly slower.",
+         "becomes significantly slower. Under imbibition the "
+         "capillary drive is what makes spontaneous imbibition "
+         "physically realistic, so leaving Pc on is standard there.",
 )
 
-selected_pc_model_name = "Brooks-Corey"  # default when Pc is disabled
+# Compute the valid Pc-model list once per process type.
+_valid_pc_models = pc_models_for_process(process_type)
+
+# If a stale Pc model is stored under session_state from a prior process
+# type, force the widget to reset to a valid choice before it renders.
+if ("pc_model" in st.session_state
+        and st.session_state["pc_model"] not in _valid_pc_models):
+    st.session_state.pop("pc_model", None)
+
+selected_pc_model_name = _valid_pc_models[0]  # sensible default when Pc off
 pc_param_values        = {}
+pc_param_names         = []
 
 if pc_enabled:
     col_m_lbl, col_m_sel = st.columns([1.2, 2.8])
@@ -197,14 +387,16 @@ if pc_enabled:
                     unsafe_allow_html=True)
     with col_m_sel:
         selected_pc_model_name = st.selectbox(
-            "Pc model", PC_MODEL_CHOICES, index=0,
+            "Pc model", _valid_pc_models, index=0,
             key="pc_model", label_visibility="collapsed",
             help=(
-                "• Brooks-Corey — 2 parameters (P_entry, λ). Sharp entry "
-                "threshold; industry-standard default.\n"
-                "• van Genuchten — 2 parameters (α, n) with Mualem-linked "
-                "m = 1 − 1/n. Smooth transition; preferred for wettability-"
-                "altered rocks or where BC's threshold step doesn't fit."
+                "Filtered by PROCESS TYPE. Under drainage, Brooks-Corey "
+                "(sharp entry threshold, industry default) or van "
+                "Genuchten (smooth transition, Mualem-linked m = 1 − "
+                "1/n, preferred for wettability-altered rocks). Under "
+                "imbibition, Skjaeveland (mixed-wet, Pc can cross zero "
+                "into negative values to capture wettability "
+                "transitions)."
             ),
         )
     pc_model_cls   = get_pc_model_class(selected_pc_model_name)
@@ -273,11 +465,14 @@ n_cells = st.number_input(
     key="n_cells",
     help="Number of 1D finite-difference cells. More cells = sharper "
          "front but slower runs. 100 is a sensible default; use 200+ "
-         "for publication-grade plots.",
+         "for publication-grade plots. For DE inverse fits on LET on "
+         "Streamlit Cloud, N = 40 is the tested workaround for the "
+         "~30 min execution wall.",
 )
 
 # ── Stash inputs in session_state ───────────────────────────────────────────
 st.session_state["tp_inputs"] = {
+    "process_type": process_type,
     "injected":  injected,
     "displaced": displaced,
     "S_inj_r":   s_inj_r,
@@ -340,6 +535,7 @@ with st.expander("Collected inputs (debug)", expanded=False):
     )
     st.markdown(
         f'<div class="debug-box">'
+        f'<b>Process:</b> <code>{process_type}</code><br>'
         f'<b>Injected:</b> {injected["name"]} — '
         f'μ=<code>{injected["viscosity_cP"]:.4f} cP</code><br>'
         f'<b>Displaced:</b> {displaced["name"]} — '
@@ -699,7 +895,7 @@ with tab_inv:
                 progress_box.markdown(
                     f'<div class="metric-card">'
                     f'<b>Call {i}/~{expected_calls}</b> — '
-                    f'SSE=<code>{sse:.3f}</code><br>'
+                    f'objective=<code>{sse:.3f}</code><br>'
                     f'{param_str}'
                     f'</div>',
                     unsafe_allow_html=True,
@@ -758,7 +954,7 @@ with tab_inv:
             f'<b>Converged:</b> '
             f'<code>{"yes" if fit["converged"] else "no"}</code> '
             f'({fit["n_calls"]} forward calls) — '
-            f'<b>SSE</b>=<code>{fit["sse"]:.3f} mbar²</code><br>'
+            f'<b>objective</b>=<code>{fit["sse"]:.3f} mbar²</code><br>'
             f'{fp_lines}<br>'
             f'<b>Message:</b> {fit["message"]}'
             f'</div>',

@@ -11,10 +11,15 @@ Visual aesthetic mirrors PermCalc's existing inline charts:
 Functions
 ---------
 build_kr_chart              : static kr_inj / kr_disp vs S_inj.
-build_pc_chart              : static Brooks-Corey Pc(S_inj), semi-log.
-build_dp_time_chart         : animated ΔP vs time.
+build_pc_chart              : static Pc(S_inj); log y-scale for drainage
+                              (BC / vG, strictly positive), linear
+                              y-scale for imbibition (Skjaeveland, can
+                              cross zero into negatives -- the log
+                              scale would silently hide the very
+                              physics Skjaeveland exists to represent).
+build_dp_time_chart         : animated dP vs time.
 build_profile_animation     : animated S_inj(x), with slider.
-build_history_match_chart   : measured ΔP (markers) + simulated ΔP (line).
+build_history_match_chart   : measured dP (markers) + simulated dP (line).
 render_chart_html           : Plotly figure -> HTML string (+ autoplay).
 """
 
@@ -23,7 +28,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 
-# ── Style constants ─────────────────────────────────────────────────────────
+# -- Style constants --------------------------------------------------------
 COLOR_INJ   = "#2DD4BF"
 COLOR_DISP  = "#FB923C"
 COLOR_REF   = "#DC2626"
@@ -38,7 +43,7 @@ TITLE_FONT      = dict(family="Courier New", color=COLOR_TITLE, size=14)
 ANNOT_FONT      = dict(color=COLOR_REF, family="Courier New", size=12)
 
 
-# ── Shared layout ───────────────────────────────────────────────────────────
+# -- Shared layout ----------------------------------------------------------
 def _apply_layout(fig, x_title, y_title, x_range, y_range, title,
                   showlegend=False, y_log=False, height=380):
     y_axis_range = ([np.log10(y_range[0]), np.log10(y_range[1])]
@@ -74,7 +79,7 @@ def _apply_layout(fig, x_title, y_title, x_range, y_range, title,
     )
 
 
-# ── kr chart (static) ───────────────────────────────────────────────────────
+# -- kr chart (static) ------------------------------------------------------
 def build_kr_chart(kr_data, inj_name="Injected", disp_name="Displaced"):
     S = kr_data["S_inj"]
     fig = go.Figure([
@@ -101,7 +106,7 @@ def build_kr_chart(kr_data, inj_name="Injected", disp_name="Displaced"):
     fig.add_vline(
         x=1.0 - kr_data["S_disp_r"],
         line=dict(color=COLOR_AXIS, width=1, dash="dot"),
-        annotation_text=f"1−S_r,disp={1 - kr_data['S_disp_r']:.2f}",
+        annotation_text=f"1-S_r,disp={1 - kr_data['S_disp_r']:.2f}",
         annotation_font=dict(color=COLOR_AXIS, family="Courier New", size=11),
         annotation_position="top",
     )
@@ -120,13 +125,37 @@ def build_kr_chart(kr_data, inj_name="Injected", disp_name="Displaced"):
     return fig
 
 
-# ── Pc chart (static, semi-log) ─────────────────────────────────────────────
+# -- Pc chart (static; log for drainage, linear for imbibition) -------------
 def build_pc_chart(pc_data, S_inj_r, S_disp_r):
+    """
+    Plot Pc(S_inj).
+
+    Y-axis scale is chosen based on process_type in the pc_data dict:
+
+        drainage   -- Pc is strictly positive for Brooks-Corey and van
+                      Genuchten, spans many orders of magnitude near
+                      the residual saturation. Log scale reads best.
+
+        imbibition -- Skjaeveland Pc can cross zero into negative
+                      values in mixed-wet saturation ranges. A log
+                      scale would silently drop the negative half of
+                      the curve and hide the entire wettability
+                      transition that Skjaeveland exists to model.
+                      Linear scale, with a dotted zero line, keeps
+                      the sign visible.
+
+    The x-axis is always S_inj -- the injected-phase saturation, which
+    equals S_w under imbibition (injected = wetting) and 1 - S_w under
+    drainage (injected = non-wetting). The chart title notes which
+    interpretation applies.
+    """
     S  = pc_data["S_inj"]
     Pc = pc_data["Pc_mbar"]
+    process_type = pc_data.get("process_type", "drainage")
     mask = (S >= S_inj_r) & (S <= 1.0 - S_disp_r)
     Sm = S[mask]
     Pm = Pc[mask]
+
     fig = go.Figure([
         go.Scatter(
             x=Sm, y=Pm, mode="lines",
@@ -134,19 +163,58 @@ def build_pc_chart(pc_data, S_inj_r, S_disp_r):
             hovertemplate="S_inj=%{x:.3f}<br>Pc=%{y:.2f} mbar<extra></extra>",
         ),
     ])
-    y_min = max(float(np.nanmin(Pm)) * 0.5, 1e-2)
-    y_max = float(np.nanmax(Pm)) * 2.0
-    _apply_layout(
-        fig,
-        "<b>S_inj  [-]</b>", "<b>Pc  [mbar]</b>",
-        (0.0, 1.0), (y_min, y_max),
-        f"Capillary pressure ({pc_data.get('model_name', 'Brooks–Corey')})",
-        y_log=True,
-    )
+
+    model_name = pc_data.get("model_name", "Brooks-Corey")
+
+    if process_type == "drainage":
+        # Log scale; guard against a nonpositive minimum.
+        y_min = max(float(np.nanmin(Pm)) * 0.5, 1e-2)
+        y_max = float(np.nanmax(Pm)) * 2.0
+        title = (f"Capillary pressure — drainage ({model_name}); "
+                 f"S_inj = 1 − S_w (injected = non-wetting)")
+        _apply_layout(
+            fig,
+            "<b>S_inj  [-]</b>", "<b>Pc  [mbar]</b>",
+            (0.0, 1.0), (y_min, y_max),
+            title,
+            y_log=True,
+        )
+    else:
+        # Linear scale, symmetric around zero when Pc crosses it, with
+        # a dotted horizontal reference line at Pc = 0.
+        pc_max_abs = max(float(np.nanmax(np.abs(Pm))), 1.0)
+        if float(np.nanmin(Pm)) < 0.0:
+            # Pc crosses zero -> symmetric range with a small pad.
+            y_min = -pc_max_abs * 1.10
+            y_max = +pc_max_abs * 1.10
+        else:
+            # Pc stayed non-negative even under imbibition (weak oil-wet
+            # contribution). Show 0 at the axis to preserve context.
+            y_min = 0.0
+            y_max = pc_max_abs * 1.10
+        title = (f"Capillary pressure — imbibition ({model_name}); "
+                 f"S_inj = S_w (injected = wetting)")
+        _apply_layout(
+            fig,
+            "<b>S_inj  [-]</b>", "<b>Pc  [mbar]</b>",
+            (0.0, 1.0), (y_min, y_max),
+            title,
+            y_log=False,
+        )
+        # Zero reference line to make the sign transition visible.
+        fig.add_hline(
+            y=0.0,
+            line=dict(color=COLOR_AXIS, width=1, dash="dot"),
+            annotation_text="Pc = 0",
+            annotation_font=dict(color=COLOR_AXIS,
+                                 family="Courier New", size=11),
+            annotation_position="right",
+        )
+
     return fig
 
 
-# ── ΔP vs time (animated, PermCalc style) ───────────────────────────────────
+# -- dP vs time (animated, PermCalc style) ----------------------------------
 def build_dp_time_chart(results):
     t  = results["t_min"]
     dp = results["dP_mbar"]
@@ -195,7 +263,7 @@ def build_dp_time_chart(results):
     return fig
 
 
-# ── Saturation profile (animated, with slider) ─────────────────────────────
+# -- Saturation profile (animated, with slider) -----------------------------
 def build_profile_animation(results):
     x_cm   = results["x_cm"]
     S_prof = results["S_inj_profiles"]
@@ -264,7 +332,7 @@ def build_profile_animation(results):
     return fig
 
 
-# ── History-match (measured markers + fitted line) ─────────────────────────
+# -- History-match (measured markers + fitted line) -------------------------
 def build_history_match_chart(measured_t_min, measured_dp_mbar, sim_results):
     sim_t  = sim_results["t_min"]
     sim_dp = sim_results["dP_mbar"]
@@ -310,7 +378,7 @@ def build_history_match_chart(measured_t_min, measured_dp_mbar, sim_results):
     return fig
 
 
-# ── HTML conversion + optional autoplay ────────────────────────────────────
+# -- HTML conversion + optional autoplay ------------------------------------
 def render_chart_html(fig, autoplay=False):
     html_str = pio.to_html(
         fig,
