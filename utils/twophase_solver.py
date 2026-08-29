@@ -269,14 +269,23 @@ def run_forward(tp_inputs,
         np.clip(S, S_inj_r, 1.0 - S_disp_r, out=S)
         t += dt
 
+        # Breakthrough detection at every time step (not tied to
+        # snapshot times, so BT resolution equals dt rather than
+        # t_total / n_snapshots). Without this, close-BT runs like
+        # Brooks-Corey vs van Genuchten under the same conditions
+        # get aliased into the same snapshot bin and appear to have
+        # identical BT even when the underlying physics differs.
+        if bt_PVI is None:
+            f_out = frac_flow(S)[-1]
+            if f_out > bt_threshold:
+                bt_time = t
+                bt_PVI  = u_t * A * t / PV
+
         # Snapshot recording (loop handles multiple crossings)
         while (next_snap < n_snapshots
                and t >= snap_times[next_snap] - 1e-12):
             _record(snap_times[next_snap], S)
-            if bt_PVI is None and frac_flow(S)[-1] > bt_threshold:
-                bt_PVI  = rec_PVI[-1]
-                bt_time = rec_t[-1]
-            next_snap += 1
+            next_snap += 1  
     else:
         raise RuntimeError(
             f"IMPES forward sim hit max_steps={max_steps} before "
