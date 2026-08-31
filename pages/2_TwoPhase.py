@@ -402,6 +402,76 @@ if pc_enabled:
     pc_model_cls   = get_pc_model_class(selected_pc_model_name)
     pc_param_names = list(pc_model_cls.parameter_names)
 
+    # Contextual note describing how well the chosen (process_type,
+    # Pc-model) combination matches standard published practice. All
+    # six combinations are physically simulable — the solver and
+    # normalization branch on process_type, not on model — but some
+    # pairings are more common than others and this note flags the
+    # ones that need a wettability caveat. Uses .info-box for neutral
+    # notes and .warn-box for pairings that risk missing important
+    # physics if the user hasn't thought about them.
+    _pair = (process_type, selected_pc_model_name)
+    if _pair == ("drainage", "Brooks-Corey"):
+        _pc_note = (
+            '<div class="info-box">Standard drainage combination — '
+            'Brooks-Corey with a sharp entry-pressure threshold. '
+            'Industry default for water-wet sandstones and consolidated '
+            'reservoir rocks.</div>'
+        )
+    elif _pair == ("drainage", "van Genuchten"):
+        _pc_note = (
+            '<div class="info-box">Standard drainage combination — '
+            'van Genuchten with a smooth (thresholdless) Pc rise. '
+            'Preferred over Brooks-Corey for carbonates, tight rocks, '
+            'and wettability-transitional systems where the entry-'
+            'pressure step in BC doesn\'t match measured data.</div>'
+        )
+    elif _pair == ("drainage", "Skjaeveland"):
+        _pc_note = (
+            '<div class="warn-box">⚠ Unusual combination — Skjaeveland '
+            'is designed for imbibition where Pc can cross zero in '
+            'mixed-wet systems. Under drainage its two-term form can '
+            'still be tuned to a positive-only curve by setting '
+            '<code>c_o</code> close to zero, but published practice '
+            'uses Brooks-Corey or van Genuchten for drainage. Only '
+            'select this if you have a specific reason (e.g. '
+            'benchmarking against a Skjaeveland-parameterized dataset '
+            'that includes drainage cycles).</div>'
+        )
+    elif _pair == ("imbibition", "Brooks-Corey"):
+        _pc_note = (
+            '<div class="warn-box">⚠ Brooks-Corey under imbibition '
+            'produces a strictly positive Pc, valid only for <b>strongly '
+            'water-wet</b> imbibition where the wetting phase never '
+            'encounters oil-wet pore fractions. If the rock has any '
+            'wettability alteration (aged sandstones, most carbonates), '
+            'Pc crosses zero during imbibition and BC will miss that '
+            'physics — use Skjaeveland instead.</div>'
+        )
+    elif _pair == ("imbibition", "van Genuchten"):
+        _pc_note = (
+            '<div class="warn-box">⚠ van Genuchten under imbibition '
+            'produces a strictly positive Pc, valid only for <b>strongly '
+            'water-wet</b> imbibition. Smoother than Brooks-Corey near '
+            'the endpoint. If the rock is mixed-wet or oil-wet, Pc '
+            'crosses zero during imbibition and vG will miss that '
+            'physics — use Skjaeveland instead.</div>'
+        )
+    elif _pair == ("imbibition", "Skjaeveland"):
+        _pc_note = (
+            '<div class="info-box">Standard imbibition combination — '
+            'Skjaeveland\'s two-term form (positive water-wet '
+            'contribution plus negative oil-wet contribution) captures '
+            'wettability transitions in mixed-wet systems. Set '
+            '<code>c_o</code> close to zero for a strongly water-wet '
+            'imbibition; increase |<code>c_o</code>| to represent '
+            'progressive oil-wet character.</div>'
+        )
+    else:
+        _pc_note = ""
+    if _pc_note:
+        st.markdown(_pc_note, unsafe_allow_html=True)
+
     n_cols = min(2, len(pc_param_names))
     cols = st.columns(n_cols)
     for i, name in enumerate(pc_param_names):
