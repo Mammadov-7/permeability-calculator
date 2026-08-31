@@ -105,7 +105,7 @@ class BrooksCoreyPc(PcModel):
     """
 
     name = "Brooks-Corey"
-    process_types = ["drainage"]
+    process_types = ["drainage", "imbibition"]
 
     parameter_names = ["P_entry_mbar", "lambda"]
 
@@ -165,7 +165,7 @@ class VanGenuchtenPc(PcModel):
     """
 
     name = "van Genuchten"
-    process_types = ["drainage"]
+    process_types = ["drainage", "imbibition"]
 
     parameter_names = ["alpha_vg", "n_vg"]
 
@@ -267,7 +267,7 @@ class SkjaevelandPc(PcModel):
     """
 
     name = "Skjaeveland"
-    process_types = ["imbibition"]
+    process_types = ["imbibition", "drainage"]
 
     parameter_names = ["c_w", "a_w", "c_o", "a_o"]
 
