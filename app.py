@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 from calculators.absolute_perm import match_permeability
-from utils.eos import make_eos
+from utils.eos import make_eos, has_critical_properties, EOS_LABELS
 from utils.phases import phase_picker, io_buttons
 from utils.ui import (
     inject_shared_css, render_header, input_row, injection_rate_row,
@@ -180,13 +180,33 @@ with tab_abs:
                     unsafe_allow_html=True)
 
         # Show what EOS is in use and let the user override if they want.
-        eos_is_computed = phase["eos_model"] != "incompressible"
-        eos_label = {
-            "incompressible": "Incompressible — constant c below.",
-            "ideal_gas":      "Ideal gas — c = 1/P computed per cell.",
-        }.get(phase["eos_model"], phase["eos_model"])
+        if phase["eos_model"] == "incompressible":
+            eos_options = ["incompressible"]
+        else:
+            eos_options = ["ideal_gas"]
+            if has_critical_properties(phase):
+                eos_options.append("peng_robinson")
 
-        st.caption(f"EOS model: **{eos_label}**")
+        _default = phase["eos_model"]
+        eos_model = st.selectbox(
+            "EOS model", eos_options,
+            index=(eos_options.index(_default)
+                   if _default in eos_options else 0),
+            key=f"eos_choice_{phase['name']}",
+            format_func=lambda m: EOS_LABELS.get(m, m),
+        )
+
+        if eos_model == "peng_robinson":
+            st.caption(
+                "Peng-Robinson supplies c and density. Viscosity stays "
+                "the constant value from the phase library."
+            )
+        elif (phase["eos_model"] != "incompressible"
+              and not has_critical_properties(phase)):
+            st.caption("No critical properties on this phase — "
+                       "Peng-Robinson unavailable.")
+
+        eos_is_computed = eos_model != "incompressible"
 
         override = False
         if eos_is_computed:
@@ -220,7 +240,7 @@ with tab_abs:
             # sense of magnitude before running.
             st.text_input(
                 "c [1/Pa] (computed from EOS at back-pressure)",
-                value=f"{1.0 / 1e5:.3e}   ← updated after solve",
+                value="computed per timestep — see result card",
                 key="c_readonly", disabled=True,
             )
             c_manual_Pa = None      # ignored by IdealGasEOS
@@ -282,8 +302,9 @@ with tab_abs:
             # User supplied a specific c → treat as incompressible for solve.
             eos = make_eos("incompressible", c_user_Pa=c_manual_Pa)
         else:
-            eos = make_eos(phase["eos_model"],
-                           c_user_Pa=phase.get("compressibility_1_per_Pa"))
+            eos = make_eos(eos_model,
+                           c_user_Pa=phase.get("compressibility_1_per_Pa"),
+                           phase=phase)
 
         with st.spinner("Running Nelder-Mead optimisation…"):
             k, t_arr, dp_arr, n_iter = match_permeability(
@@ -299,7 +320,12 @@ with tab_abs:
         # Report the c that the EOS *actually used* at the final pressure.
         P_final_Pa = (final_dp + P_out_bar * 1000.0) * 100.0   # mbar → Pa
         c_used = eos.get_compressibility(P_final_Pa, T_K)
+        z_used = eos.get_z_factor(P_final_Pa, T_K)
+        two_phase = (eos.root_info(P_final_Pa, T_K)["two_phase"]
+                     if hasattr(eos, "root_info") else False)
         result = {
+            "z_used": z_used, "two_phase": two_phase,
+            "c_dev_pct": (c_used * P_final_Pa - 1.0) * 100.0,
             "k": k, "t_arr": t_arr, "dp_arr": dp_arr,
             "n_iter": n_iter, "final_dp": final_dp, "error_pct": error_pct,
             "target_dp": target_dp_mbar, "total_time": total_time_min,
@@ -321,7 +347,8 @@ with tab_abs:
                 <div style="font-size: 13px; line-height: 1.9;">
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Phase</span><span>{result['phase']}</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">EOS</span><span>{result['eos_name']}</span></div>
-                  <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">c used</span><span>{result['c_used']:.3e} /Pa</span></div>
+                  <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Z factor</span><span>{result['z_used']:.4f}</span></div>
+                  <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">c vs ideal</span><span>{result['c_dev_pct']:+.2f} %</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Target ΔP</span><span>{result['target_dp']:.2f} mbar</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Final ΔP</span><span>{result['final_dp']:.2f} mbar</span></div>
                   <div style="display: flex; justify-content: space-between;"><span style="color:#9CA3AF;">Error</span><span style="color:#2DD4BF;">{result['error_pct']:.2f} %</span></div>
@@ -332,6 +359,13 @@ with tab_abs:
                 """,
                 unsafe_allow_html=True,
             )
+            if result["two_phase"]:
+                st.warning(
+                    "Operating point is inside the two-phase envelope. "
+                    "The cubic has two physical roots; the lower-Gibbs "
+                    "root was selected. The solver assumes single-phase "
+                    "flow, so treat this result with care."
+                )
         else:
             st.markdown(
                 """

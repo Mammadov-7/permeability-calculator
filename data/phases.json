@@ -4,48 +4,76 @@
     "density_kg_m3": 997.0,
     "viscosity_cP": 0.89,
     "eos_model": "incompressible",
-    "compressibility_1_per_Pa": 4.5e-10
+    "compressibility_1_per_Pa": 4.5e-10,
+    "molar_mass_g_mol": 18.015,
+    "Tc_K": null,
+    "Pc_Pa": null,
+    "omega": null
   },
   "Brine (3% NaCl)": {
     "type": "liquid",
     "density_kg_m3": 1020.0,
     "viscosity_cP": 1.05,
     "eos_model": "incompressible",
-    "compressibility_1_per_Pa": 4.5e-10
+    "compressibility_1_per_Pa": 4.5e-10,
+    "molar_mass_g_mol": null,
+    "Tc_K": null,
+    "Pc_Pa": null,
+    "omega": null
   },
   "H2": {
     "type": "gas",
     "density_kg_m3": 0.082,
     "viscosity_cP": 0.0089,
     "eos_model": "ideal_gas",
-    "compressibility_1_per_Pa": null
+    "compressibility_1_per_Pa": null,
+    "molar_mass_g_mol": 2.016,
+    "Tc_K": 33.145,
+    "Pc_Pa": 1296400.0,
+    "omega": -0.219
   },
   "CO2": {
     "type": "gas",
-    "density_kg_m3": 1.80,
+    "density_kg_m3": 1.8,
     "viscosity_cP": 0.0149,
     "eos_model": "ideal_gas",
-    "compressibility_1_per_Pa": null
+    "compressibility_1_per_Pa": null,
+    "molar_mass_g_mol": 44.01,
+    "Tc_K": 304.13,
+    "Pc_Pa": 7377300.0,
+    "omega": 0.2236
   },
   "N2": {
     "type": "gas",
     "density_kg_m3": 1.14,
     "viscosity_cP": 0.0178,
     "eos_model": "ideal_gas",
-    "compressibility_1_per_Pa": null
+    "compressibility_1_per_Pa": null,
+    "molar_mass_g_mol": 28.013,
+    "Tc_K": 126.19,
+    "Pc_Pa": 3395800.0,
+    "omega": 0.0372
   },
   "CH4": {
     "type": "gas",
     "density_kg_m3": 0.66,
     "viscosity_cP": 0.0111,
     "eos_model": "ideal_gas",
-    "compressibility_1_per_Pa": null
+    "compressibility_1_per_Pa": null,
+    "molar_mass_g_mol": 16.043,
+    "Tc_K": 190.56,
+    "Pc_Pa": 4599200.0,
+    "omega": 0.0114
   },
   "Oil (light, generic)": {
     "type": "liquid",
     "density_kg_m3": 850.0,
     "viscosity_cP": 5.0,
     "eos_model": "incompressible",
-    "compressibility_1_per_Pa": 8.0e-10
+    "compressibility_1_per_Pa": 8.0e-10,
+    "molar_mass_g_mol": null,
+    "Tc_K": null,
+    "Pc_Pa": null,
+    "omega": null
   }
 }

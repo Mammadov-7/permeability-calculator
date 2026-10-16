@@ -104,6 +104,10 @@ def phase_picker(key_prefix, default=None):
         "compressibility_1_per_Pa": base.get(
             "compressibility_1_per_Pa", None
         ),
+        "molar_mass_g_mol": base.get("molar_mass_g_mol", None),
+        "Tc_K":             base.get("Tc_K", None),
+        "Pc_Pa":            base.get("Pc_Pa", None),
+        "omega":            base.get("omega", None),
     }
 
 
@@ -161,6 +165,10 @@ def _custom_phase_form(key_prefix):
         "viscosity_cP": mu_cP,
         "eos_model": eos_model,
         "compressibility_1_per_Pa": c_val,
+        "molar_mass_g_mol": None,
+        "Tc_K": None,
+        "Pc_Pa": None,
+        "omega": None,
     }
 
 
