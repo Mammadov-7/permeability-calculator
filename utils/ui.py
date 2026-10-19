@@ -19,8 +19,9 @@ import streamlit as st
 # ── CSS block ──────────────────────────────────────────────────────────────
 _SHARED_CSS = """
 <style>
-[data-testid="stSidebarNav"]  {display: none;}
-[data-testid="stSidebar"]     {display: none;}
+#MainMenu                     {visibility: hidden;}
+header                        {visibility: hidden;}
+footer                        {visibility: hidden;}
 #MainMenu                     {visibility: hidden;}
 header                        {visibility: hidden;}
 footer                        {visibility: hidden;}
