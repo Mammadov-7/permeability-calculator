@@ -89,7 +89,7 @@ st.set_page_config(
     page_title="CoreFlood Lab — Two-Phase",
     page_icon="🛢️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 inject_shared_css()

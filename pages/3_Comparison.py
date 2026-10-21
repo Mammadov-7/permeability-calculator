@@ -35,10 +35,10 @@ st.set_page_config(
     page_title="CoreFlood Lab — Optimizer Comparison",
     page_icon="🛢️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-inject_shared_css()
+#inject_shared_css()
 render_header("CoreFlood Lab — Optimizer Comparison")
 
 # ── Require inputs from the Two-Phase page ─────────────────────────────────
