@@ -4,3 +4,5 @@ pandas
 matplotlib
 plotly
 scipy
+pandas<3
+plotly<6
