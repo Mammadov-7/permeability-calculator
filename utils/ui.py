@@ -31,6 +31,13 @@ footer                        {visibility: hidden;}
 
 html, body, [class*="css"] { font-family: 'Courier New', monospace; }
 
+[data-testid="stExpandSidebarButton"] {
+    opacity: 1 !important;
+    color: #2DD4BF !important;
+    background: #0F1A1F !important;
+    border: 1px solid #1F2A33 !important;
+}
+
 .section-label {
     color: #6B7785; font-size: 12px;
     letter-spacing: 0.12em; margin: 1rem 0 0.5rem 0;
