@@ -20,9 +20,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+import math
 
 from utils.ui import inject_shared_css, render_header
-from utils.kr_models import get_model_class
+from utils.kr_models import get_model_class, KR_MODEL_CHOICES
+from utils.pc_models import pc_models_for_process
+from utils.phases import get_all_phases
 from utils.plotting import render_chart_html
 from utils.units import TIME_TO_MIN, DP_TO_MBAR
 from utils.twophase_inverse import OPTIMIZER_CHOICES
@@ -46,15 +49,63 @@ inject_shared_css()
 render_header("CoreFlood Lab — Optimizer Comparison")
 
 # -- Require inputs from the Two-Phase page ---------------------------------
+def _default_phase(all_phases, name):
+    b = all_phases[name]
+    return {
+        "name": name,
+        "type": b["type"],
+        "density_kg_m3": b["density_kg_m3"],
+        "viscosity_cP": b["viscosity_cP"],
+        "eos_model": b.get("eos_model", "incompressible"),
+        "compressibility_1_per_Pa": b.get("compressibility_1_per_Pa"),
+        "molar_mass_g_mol": b.get("molar_mass_g_mol"),
+        "Tc_K": b.get("Tc_K"),
+        "Pc_Pa": b.get("Pc_Pa"),
+        "omega": b.get("omega"),
+    }
+
+
+def _default_inputs():
+    """
+    Build a standard input set so this page works on its own.
+
+    Session state only exists within one browser session, so a direct
+    link to this page — or a reload — arrives with no tp_inputs. Rather
+    than refusing to run, fall back to a sensible default case.
+    """
+    all_phases = get_all_phases()
+    model_name = KR_MODEL_CHOICES[0]
+    mc = get_model_class(model_name)
+    D_cm = 3.8
+    return {
+        "process_type": "drainage",
+        "injected":  _default_phase(all_phases, "H2"),
+        "displaced": _default_phase(all_phases, "Brine (3% NaCl)"),
+        "S_inj_r": 0.0,
+        "S_disp_r": 0.20,
+        "kr": {"model": model_name, "params": dict(mc.defaults)},
+        "pc": {"enabled": False,
+               "model": pc_models_for_process("drainage")[0],
+               "params": {}},
+        "core": {"L_cm": 10.0, "D_cm": D_cm,
+                 "A_cm2": math.pi * D_cm ** 2 / 4.0,
+                 "phi": 0.20, "k_mD": 100.0},
+        "operating": {"q_ml_min": 1.0, "P_back_bar": 1.0,
+                      "t_total_min": 60.0},
+        "numerical": {"N_cells": 40},
+    }
+
+
 tp_inputs = st.session_state.get("tp_inputs")
-if tp_inputs is None:
+using_defaults = tp_inputs is None
+if using_defaults:
+    tp_inputs = _default_inputs()
     st.markdown(
-        '<div class="warn-box">⚠ No inputs found. Open the '
-        '<b>Two-Phase</b> page first and configure the core, phases, kr '
-        'model and parameters. This page reads them from there.</div>',
+        '<div class="warn-box">Using a default case — no Two-Phase '
+        'session found. Open the <b>Two-Phase</b> page in this session '
+        'to set your own core, phases, kr model and parameters.</div>',
         unsafe_allow_html=True,
     )
-    st.stop()
 
 model_cls = get_model_class(tp_inputs["kr"]["model"])
 param_names = list(model_cls.parameter_names)
